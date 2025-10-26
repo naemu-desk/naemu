@@ -1,10 +1,4 @@
-<p align="center">
-  <img src="./public/naemu2.png" alt="NAEMU" width="120" />
-</p>
-
 # NAEMU
-
-An intraday futures trading agent built on Cloudflare. The dashboard is a single screen with a live price ticker, a canvas chart, and an activity panel with Trades, Thoughts, and Readme.
 
 ## What NAEMU does
 
@@ -213,6 +207,4 @@ curl https://api.naemu.com/api/vibe/status
 curl -X POST https://api.naemu.com/api/vibe/tick
 ```
 
-## Branding
 
-Use naemu2.png for onsite assets in the UI and naemufav.png as the favicon. The Readme banner uses naemu2.png.
