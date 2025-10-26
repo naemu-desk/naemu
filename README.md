@@ -1,4 +1,6 @@
-# NAEMU
+<p align="center">
+  <img src="./public/naemu2.png" alt="NAEMU" width="120" />
+</p>
 
 ## What NAEMU does
 
