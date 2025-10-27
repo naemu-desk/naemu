@@ -1,8 +1,8 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'NAEMU',
-  description: 'Spin up agents and actions'
+  title: 'NAEMU — Intraday Futures Agent',
+  description: 'NAEMU is an intraday futures trading agent with a live dashboard: price ticker, canvas chart, trades, and thoughts.'
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -10,6 +10,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" data-theme="dark" suppressHydrationWarning>
       <head>
         <link rel="icon" href="/naemufav.png" />
+        <link rel="canonical" href="https://naemu.com/" />
+        <meta name="title" content="NAEMU — Intraday Futures Agent" />
+        <meta name="description" content="NAEMU is an intraday futures trading agent with a live dashboard: price ticker, canvas chart, trades, and thoughts." />
+        {/* Open Graph */}
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content="https://naemu.com/" />
+        <meta property="og:title" content="NAEMU — Intraday Futures Agent" />
+        <meta property="og:description" content="NAEMU is an intraday futures trading agent with a live dashboard: price ticker, canvas chart, trades, and thoughts." />
+        <meta property="og:image" content="https://naemu.com/naemu2.png" />
+        {/* Twitter */}
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:url" content="https://naemu.com/" />
+        <meta name="twitter:title" content="NAEMU — Intraday Futures Agent" />
+        <meta name="twitter:description" content="NAEMU is an intraday futures trading agent with a live dashboard: price ticker, canvas chart, trades, and thoughts." />
+        <meta name="twitter:image" content="https://naemu.com/naemu2.png" />
         <script dangerouslySetInnerHTML={{ __html: `
 (function(){
   try {

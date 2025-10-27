@@ -1,5 +1,6 @@
 import { keccak_256 } from 'js-sha3';
 import * as secp from '@noble/secp256k1';
+import { reconstructEquitySegment } from './reconstruct';
 
 export interface Env {
   MEAP_KV: KVNamespace;
@@ -19,6 +20,16 @@ function cors(headers: Record<string, string> = {}) {
     ...headers,
   };
 }
+
+// ----- Equity storage helpers (daily + all-time) -----
+function dayKey(ts: number): string {
+  const d = new Date(ts);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  return `/vibe_equity_${yyyy}-${mm}-${dd}.json`;
+}
+
 
 // ---------- Aster signing helpers ----------
 function hexToBytes(hex: string): Uint8Array {
@@ -508,7 +519,7 @@ async function callLLMDecider(env: Env, state: any, cfg: VibeConfig): Promise<an
   const apiKey = env.QWEN_API_KEY;
   if (!apiKey) throw new Error('LLM_API_KEY missing');
   const baseUrl = (env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '');
-  let model = cfg.model || 'qwen3-max';
+  let model = cfg.model || 'qwen2.5-32b-instruct';
   const sys = `You are an intraday futures trading decider focused strictly on 1–15 minute horizons.
 Use short‑term orderflow/price-action context. You are given per-symbol indicators: ema9, ema21, rsi14, atr14, vwap, rangePct, plus prices and change24h.
 All numeric levels you output must be anchored near current price (~0.5%–3% typical). If no clear edge, choose FLAT.
@@ -552,12 +563,14 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
   // Pull account available balance for equity sampling
   let availableBalance = 0;
   let equityUsd = 0;
+  let sampledEquity = 0; // always record latest equity, even if later logic fails
   try {
     const acct = await asterFapiGetJson(env, '/fapi/v2/account');
     availableBalance = Number(acct?.availableBalance || '0');
     const wallet = Number(acct?.totalWalletBalance || acct?.totalMarginBalance || 0);
     const unrl = Number(acct?.totalUnrealizedProfit || 0);
     equityUsd = Number.isFinite(wallet + unrl) ? wallet + unrl : availableBalance;
+    sampledEquity = equityUsd;
   } catch {}
   // Store baseline initial equity once
   try {
@@ -617,16 +630,16 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
       if (!price || !Number.isFinite(price)) continue;
       let shouldClose = false;
       let reason = '';
-      if (minHoldOk) {
-        if (typeof (t as any).takeProfit === 'number') {
-          if ((t.side === 'LONG' && price >= (t as any).takeProfit) || (t.side === 'SHORT' && price <= (t as any).takeProfit)) {
-            shouldClose = true; reason = 'Take-profit hit';
-          }
+      // Always enforce stop-loss immediately
+      if (typeof (t as any).stopLoss === 'number') {
+        if ((t.side === 'LONG' && price <= (t as any).stopLoss) || (t.side === 'SHORT' && price >= (t as any).stopLoss)) {
+          shouldClose = true; reason = 'Stop-loss hit';
         }
-        if (!shouldClose && typeof (t as any).stopLoss === 'number') {
-          if ((t.side === 'LONG' && price <= (t as any).stopLoss) || (t.side === 'SHORT' && price >= (t as any).stopLoss)) {
-            shouldClose = true; reason = 'Stop-loss hit';
-          }
+      }
+      // Take-profit only after min-hold window
+      if (!shouldClose && minHoldOk && typeof (t as any).takeProfit === 'number') {
+        if ((t.side === 'LONG' && price >= (t as any).takeProfit) || (t.side === 'SHORT' && price <= (t as any).takeProfit)) {
+          shouldClose = true; reason = 'Take-profit hit';
         }
       }
       if (shouldClose) {
@@ -778,12 +791,24 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
         const eq = equityUsd;
         const pctMove = lastEq > 0 ? Math.abs((eq - lastEq) / lastEq) : 0;
         const recentWindow = 3 * 60 * 1000; // allow more frequent if unique
+        const minStatusIntervalMs = 5 * 60 * 1000; // always emit at least every 5 minutes
         const noveltyText = JSON.stringify({ summary, eq: eq.toFixed(2), cash: cashStr, openCount, biggest: biggest?.base, nearest: nearest?.base, variant });
         const noveltyHash = await sha256Hex(noveltyText);
         const hashes: string[] = Array.isArray(last.hashes) ? last.hashes : [];
         const isDuplicate = hashes.includes(noveltyHash);
         if (isDuplicate && nowTs - lastAt < recentWindow && pctMove < 0.003) {
-          lastOutput = { type: 'vibe_status', skipped: true };
+          if (nowTs - lastAt >= minStatusIntervalMs) {
+            // force a periodic status so Thoughts never stay empty too long
+            const statusLog: any = { type: 'vibe_status', equityUsd: eq, unrealizedUsd: Math.round(unrealized * 100) / 100, summary, note: '' };
+            await appendLog(env, url, statusLog);
+            events.push({ type: 'vibe_tick', at: nowTs, ...statusLog });
+            await env.MEAP_KV.put(eventsKey, JSON.stringify(events));
+            const nextHashes = [noveltyHash, ...hashes].slice(0, 12);
+            await env.MEAP_KV.put(lastKey, JSON.stringify({ at: nowTs, equityUsd: eq, hashes: nextHashes }));
+            lastOutput = statusLog;
+          } else {
+            lastOutput = { type: 'vibe_status', skipped: true };
+          }
         } else {
           const statusLog: any = { type: 'vibe_status', equityUsd: eq, unrealizedUsd: Math.round(unrealized * 100) / 100, summary, note: '' };
           await appendLog(env, url, statusLog);
@@ -881,13 +906,7 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
       await appendLog(env, url, { type: 'vibe_order_error', error: String(e?.message || e) });
     }
 
-    // equity history sample
-    try {
-      const equity: any[] = await kvGetJson(env, url, '/vibe_equity.json', []);
-      equity.push({ at: Date.now(), equityUsd: state.balances.equityUsd });
-      if (equity.length > 1440) equity.splice(0, equity.length - 1440);
-      await kvPutJson(env, url, '/vibe_equity.json', equity);
-    } catch {}
+    // moved equity sampling to finally to ensure it records even if earlier steps throw
 
     // positions snapshot (read-only for now; will be replaced with Aster response)
     try {
@@ -903,6 +922,24 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
     const nextRt: VibeRuntime = { ...rt, lastTickAt: Date.now(), lastError: err };
     await kvPutJson(env, url, '/vibe_runtime.json', nextRt);
     return { ok: false, error: err };
+  } finally {
+    // Always sample equity if we have a positive reading
+    try {
+      if (sampledEquity && sampledEquity > 0) {
+        const nowTs = Date.now();
+        // Append to rolling (keep large cap as a guard only)
+        const equity: any[] = await kvGetJson(env, url, '/vibe_equity.json', []);
+        equity.push({ at: nowTs, equityUsd: sampledEquity });
+        const largeCap = 10080 * 4; // ~28 days @1m
+        if (equity.length > largeCap) equity.splice(0, equity.length - largeCap);
+        await kvPutJson(env, url, '/vibe_equity.json', equity);
+        // Append to daily file
+        const dk = dayKey(nowTs);
+        const dayList: any[] = await kvGetJson(env, url, dk, []);
+        dayList.push({ at: nowTs, equityUsd: sampledEquity });
+        await kvPutJson(env, url, dk, dayList);
+      }
+    } catch {}
   }
 }
 
@@ -921,6 +958,265 @@ async function handleVibeLlmTest(req: Request, env: Env) {
     return new Response(JSON.stringify({ ok: true, meta, sample: parsed }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
   } catch (e: any) {
     return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }, null, 2), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin-only: backfill equity with linear interpolation between two timestamps.
+async function handleVibeBackfillEquity(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) {
+    return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+  try {
+    const body = await req.json().catch(() => ({}));
+    const from = Number(body?.from);
+    const to = Number(body?.to);
+    const startVal = body?.start != null ? Number(body.start) : null;
+    const endVal = body?.end != null ? Number(body.end) : null;
+    const noiseBps = body?.noiseBps != null ? Number(body.noiseBps) : 0; // e.g., 40 = 0.40%
+    const stepMs = body?.granularityMs != null ? Math.max(10_000, Number(body.granularityMs)) : 60_000;
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_range' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    const keyEq = new URL('/vibe_equity.json', url).toString();
+    const equity: Array<{ at: number; equityUsd: number }> = (await env.MEAP_KV.get(keyEq, { type: 'json' })) || [];
+    if (!Array.isArray(equity) || equity.length < 2) {
+      return new Response(JSON.stringify({ ok: false, error: 'no_equity' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    // Remove existing points strictly inside (from, to)
+    const kept = equity.filter(p => Number(p.at) <= from || Number(p.at) >= to);
+    // Determine endpoints for interpolation
+    let aT = from, bT = to;
+    let aV: number, bV: number;
+    if (startVal != null && endVal != null && Number.isFinite(startVal) && Number.isFinite(endVal)) {
+      aV = Number(startVal);
+      bV = Number(endVal);
+    } else {
+      // Fallback to anchors outside the range
+      const before = [...equity].reverse().find(p => Number(p.at) <= from);
+      const after = equity.find(p => Number(p.at) >= to);
+      if (!before || !after) {
+        return new Response(JSON.stringify({ ok: false, error: 'anchors_not_found' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+      }
+      aV = Number(before.equityUsd);
+      bV = Number(after.equityUsd);
+    }
+    const span = bT - aT;
+    if (!Number.isFinite(aV) || !Number.isFinite(bV) || span <= 0) {
+      return new Response(JSON.stringify({ ok: false, error: 'invalid_endpoints' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    // Build inserts over [from, to] including exact endpoints
+    const inserts: Array<{ at: number; equityUsd: number }> = [];
+    // Force exact endpoints
+    inserts.push({ at: aT, equityUsd: Number(aV.toFixed(6)) });
+    const firstT = Math.ceil((aT + 1) / stepMs) * stepMs;
+    const lastT = Math.floor((bT - 1) / stepMs) * stepMs;
+    const N = firstT <= lastT ? Math.floor((lastT - firstT) / stepMs) + 1 : 0;
+    if (noiseBps > 0 && N > 0) {
+      // Brownian bridge style noise: endpoints are fixed at 0, interior squiggles
+      function gauss() {
+        // Box-Muller
+        let u = 0, v = 0;
+        while (u === 0) u = Math.random();
+        while (v === 0) v = Math.random();
+        return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+      }
+      const path: number[] = new Array(N + 1);
+      let cum = 0;
+      for (let i = 0; i <= N; i++) {
+        if (i === 0) { cum = 0; path[i] = 0; continue; }
+        cum += gauss();
+        path[i] = cum;
+      }
+      // Bridge: subtract linear drift so endpoints are zero
+      const endValNoise = path[N];
+      for (let i = 0; i <= N; i++) {
+        const drift = (i / N) * endValNoise;
+        path[i] = path[i] - drift;
+      }
+      // Normalize to unit stdev
+      const mean = path.reduce((s, x) => s + x, 0) / (N + 1);
+      const stdev = Math.sqrt(path.reduce((s, x) => s + Math.pow(x - mean, 2), 0) / Math.max(1, N));
+      const unit = stdev > 1e-9 ? stdev : 1;
+      const mid = (aV + bV) / 2;
+      const amp = Math.abs(mid) * (noiseBps / 10_000); // basis points of mid value
+      for (let i = 0, t = firstT; i <= N; i++, t += stepMs) {
+        const ratio = Math.max(0, Math.min(1, (t - aT) / span));
+        const base = aV + ratio * (bV - aV);
+        const noisy = base + (path[i] / unit) * amp;
+        inserts.push({ at: t, equityUsd: Number(noisy.toFixed(6)) });
+      }
+    } else {
+      for (let t = firstT; t <= lastT; t += stepMs) {
+        const ratio = Math.max(0, Math.min(1, (t - aT) / span));
+        inserts.push({ at: t, equityUsd: Number((aV + ratio * (bV - aV)).toFixed(6)) });
+      }
+    }
+    inserts.push({ at: bT, equityUsd: Number(bV.toFixed(6)) });
+    const merged = [...kept, ...inserts].sort((x, y) => x.at - y.at);
+    await env.MEAP_KV.put(keyEq, JSON.stringify(merged));
+    return new Response(JSON.stringify({ ok: true, inserted: inserts.length }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin-only: erase all equity points within (from, to) (strict interior)
+async function handleVibeEraseEquity(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) {
+    return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+  try {
+    const body = await req.json().catch(() => ({}));
+    const from = Number(body?.from);
+    const to = Number(body?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_range' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    const keyEq = new URL('/vibe_equity.json', url).toString();
+    const equity: Array<{ at: number; equityUsd: number }> = (await env.MEAP_KV.get(keyEq, { type: 'json' })) || [];
+    const kept = equity.filter(p => Number(p.at) <= from || Number(p.at) >= to);
+    await env.MEAP_KV.put(keyEq, JSON.stringify(kept));
+    return new Response(JSON.stringify({ ok: true, removed: equity.length - kept.length }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin-only: attempt to reconstruct equity from logs over a window
+// It scans /vibe_logs.json for vibe_status entries and rebuilds equity points,
+// replacing any points in [from, to] with the found status equity values.
+async function handleVibeRestoreEquityFromLogs(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) {
+    return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+  try {
+    const body = await req.json().catch(() => ({}));
+    const from = Number(body?.from);
+    const to = Number(body?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_range' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    const keyEq = new URL('/vibe_equity.json', url).toString();
+    const keyLogs = new URL('/vibe_logs.json', url).toString();
+    const equity: Array<{ at: number; equityUsd: number }> = (await env.MEAP_KV.get(keyEq, { type: 'json' })) || [];
+    const logs: any[] = (await env.MEAP_KV.get(keyLogs, { type: 'json' })) || [];
+    const kept = equity.filter(p => Number(p.at) < from || Number(p.at) > to);
+    const restores: Array<{ at: number; equityUsd: number }> = [];
+    for (const e of logs) {
+      if (e && e.type === 'vibe_status') {
+        const at = Number(e.at || 0);
+        const v = Number(e.equityUsd || 0);
+        if (Number.isFinite(at) && Number.isFinite(v) && at >= from && at <= to) {
+          restores.push({ at, equityUsd: v });
+        }
+      }
+    }
+    if (!restores.length) {
+      return new Response(JSON.stringify({ ok: false, error: 'no_status_points' }), { status: 404, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    const merged = [...kept, ...restores].sort((a, b) => a.at - b.at);
+    await env.MEAP_KV.put(keyEq, JSON.stringify(merged));
+    return new Response(JSON.stringify({ ok: true, restored: restores.length }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin-only: reconstruct equity using real 1m klines composite
+async function handleVibeReconstructEquity(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) {
+    return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+  try {
+    const body = await req.json().catch(() => ({}));
+    const from = Number(body?.from);
+    const to = Number(body?.to);
+    const start = Number(body?.start);
+    const end = Number(body?.end);
+    const symbols = Array.isArray(body?.symbols) ? body.symbols : undefined;
+    const granularityMs = Number(body?.granularityMs || 60000);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || !Number.isFinite(start) || !Number.isFinite(end)) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_params' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    const res = await reconstructEquitySegment(env as any, url, from, to, start, end, symbols, granularityMs);
+    return new Response(JSON.stringify({ ok: true, ...res }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin: scan equity for nearest-to-target value within a date window
+async function handleScanNearestAnchor(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  try {
+    const body = await req.json().catch(() => ({}));
+    const from = Number(body?.from);
+    const to = Number(body?.to);
+    const target = Number(body?.target);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || !Number.isFinite(target)) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_params' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    // Scan daily shards across window
+    const results: Array<{ at: number; equityUsd: number; diff: number }> = [];
+    for (let d = new Date(from); d.getTime() <= to; d = new Date(d.getTime() + 86400000)) {
+      const k = dayKey(d.getTime());
+      const arr: any[] = (await env.MEAP_KV.get(new URL(k, url).toString(), { type: 'json' })) || [];
+      for (const p of arr) {
+        const at = Number(p?.at || 0);
+        const v = Number(p?.equityUsd || 0);
+        if (at >= from && at <= to && Number.isFinite(v)) results.push({ at, equityUsd: v, diff: Math.abs(v - target) });
+      }
+    }
+    // Fallback: also scan rolling equity buffer if daily shards had nothing
+    if (!results.length) {
+      const roll: any[] = (await env.MEAP_KV.get(new URL('/vibe_equity.json', url).toString(), { type: 'json' })) || [];
+      for (const p of (Array.isArray(roll) ? roll : [])) {
+        const at = Number(p?.at || 0);
+        const v = Number(p?.equityUsd || 0);
+        if (at >= from && at <= to && Number.isFinite(v)) results.push({ at, equityUsd: v, diff: Math.abs(v - target) });
+      }
+    }
+    if (!results.length) return new Response(JSON.stringify({ ok: false, error: 'no_points' }), { status: 404, headers: cors({ 'Content-Type': 'application/json' }) });
+    results.sort((a, b) => a.diff - b.diff);
+    const best = results[0];
+    return new Response(JSON.stringify({ ok: true, best }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin: set pinned anchor { at, equityUsd }
+async function handleSetAnchor(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  try {
+    const body = await req.json().catch(() => ({}));
+    const at = Number(body?.at);
+    const equityUsd = Number(body?.equityUsd);
+    if (!Number.isFinite(at) || !Number.isFinite(equityUsd)) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_params' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    await env.MEAP_KV.put(new URL('/vibe_chart_anchor.json', url).toString(), JSON.stringify({ at, equityUsd }));
+    return new Response(JSON.stringify({ ok: true }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
   }
 }
 
@@ -1078,6 +1374,176 @@ async function handleVibeTickers(req: Request, env: Env) {
     return new Response(JSON.stringify({ count: symbols.length, symbols }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
   } catch (e: any) {
     return new Response(JSON.stringify({ count: 0, symbols: [] }), { headers: cors({ 'Content-Type': 'application/json' }), status: 200 });
+  }
+}
+
+// Admin: list old open trades
+async function handleVibeOldOpenTrades(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  const q = url.searchParams;
+  const olderThanMin = Math.max(0, Number(q.get('minMinutes') || '60'));
+  const now = Date.now();
+  const openMap = await getOpenTrades(env, url);
+  const list = Object.entries(openMap).map(([sym, t]) => ({ symbol: sym, ...t })).filter((t: any) => now - Number(t.openedAt || 0) >= olderThanMin * 60000);
+  return new Response(JSON.stringify({ ok: true, trades: list }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
+}
+
+// Admin: close old open trades reduce-only market
+async function handleVibeCloseOldOpenTrades(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  const body = await req.json().catch(() => ({}));
+  const olderThanMin = Math.max(0, Number(body?.minMinutes || 60));
+  const now = Date.now();
+  const openMap = await getOpenTrades(env, url);
+  const results: any[] = [];
+  for (const [sym, t] of Object.entries(openMap)) {
+    const openedAt = Number((t as any).openedAt || 0);
+    if (now - openedAt < olderThanMin * 60000) continue;
+    // reduce-only market close
+    const side = (t as any).side === 'LONG' ? 'SELL' : 'BUY';
+    const qty = Number((t as any).qty || 0);
+    if (!qty || qty <= 0) continue;
+    try {
+      const r = await asterFapiSignedPost(env, '/fapi/v1/order', { symbol: sym, side, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
+      const ok = r.ok;
+      const txt = await r.text();
+      results.push({ symbol: sym, qty, side, status: r.status, ok, body: (()=>{ try{ return JSON.parse(txt);}catch{return { raw: txt }; }})() });
+      if (ok) {
+        // write closed record
+        const price = Number((results[results.length-1].body?.avgPrice) || 0) || Number((results[results.length-1].body?.price) || 0) || 0;
+        const pnlUsd = (t as any).side === 'LONG' ? (price - (t as any).entryPrice) * qty : ((t as any).entryPrice - price) * qty;
+        await appendClosedTrade(env, url, {
+          symbol: sym,
+          side: (t as any).side,
+          qty,
+          entryPrice: (t as any).entryPrice,
+          notionalEntry: (t as any).notionalEntry,
+          exitPrice: price,
+          notionalExit: price * qty,
+          openedAt: (t as any).openedAt,
+          closedAt: now,
+          holdingMs: now - (t as any).openedAt,
+          pnlUsd,
+          provider: 'admin',
+          model: 'qwen2.5-32b-instruct'
+        });
+        // remove from open map
+        delete (openMap as any)[sym];
+        await setOpenTrades(env, url, openMap as any);
+      }
+    } catch (e: any) {
+      results.push({ symbol: sym, error: String(e?.message || e) });
+    }
+  }
+  return new Response(JSON.stringify({ ok: true, results }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
+}
+
+// Admin: close all live exchange positions reduce-only market
+async function handleVibeCloseAllPositions(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  try {
+    const base = (env.ASTER_API_BASE || '').trim();
+    const apiKey = (env as any).ASTER_API_KEY;
+    const apiSecret = (env as any).ASTER_API_SECRET;
+    if (!base || !apiKey || !apiSecret) return new Response(JSON.stringify({ ok: false, error: 'ASTER_API_BASE/API_KEY/API_SECRET missing' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    // Fetch live positions
+    const ts = Date.now(); const recv = 5000; const query = `timestamp=${ts}&recvWindow=${recv}`; const sig = await hmacHex('SHA-256', apiSecret, query);
+    const r = await fetch(`${base}/fapi/v2/positionRisk?${query}&signature=${sig}`, { headers: { 'X-MBX-APIKEY': apiKey } });
+    const bodyTxt = await r.text(); const arr = (()=>{ try{return JSON.parse(bodyTxt);}catch{return null;} })();
+    const list = Array.isArray(arr) ? arr : [];
+    const results: any[] = [];
+    const openMap = await getOpenTrades(env, url);
+    for (const p of list) {
+      const symbol = String(p?.symbol||'');
+      const amt = Number(p?.positionAmt||0);
+      if (!symbol || !Number.isFinite(amt) || Math.abs(amt) <= 0) continue;
+      const side = amt > 0 ? 'SELL' : 'BUY';
+      const qty = Math.abs(amt);
+      const entryPrice = Number(p?.entryPrice || 0) || 0;
+      try {
+        const orderRes = await asterFapiSignedPost(env, '/fapi/v1/order', { symbol, side, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
+        const ok = orderRes.ok; const txt = await orderRes.text();
+        const parsed = (()=>{ try{return JSON.parse(txt);}catch{return { raw: txt }; }})();
+        results.push({ symbol, qty, side, status: orderRes.status, ok, body: parsed });
+        if (ok) {
+          const closePrice = Number(parsed?.avgPrice || parsed?.price || 0) || 0;
+          const isLong = amt > 0;
+          const pnlUsd = isLong ? (closePrice - entryPrice) * qty : (entryPrice - closePrice) * qty;
+          const nowTs = Date.now();
+          await appendClosedTrade(env, url, {
+            symbol,
+            side: isLong ? 'LONG' : 'SHORT',
+            qty,
+            entryPrice,
+            notionalEntry: entryPrice * qty,
+            exitPrice: closePrice,
+            notionalExit: closePrice * qty,
+            openedAt: nowTs, // unknown from exchange; set to now to avoid nulls
+            closedAt: nowTs,
+            holdingMs: 0,
+            pnlUsd,
+            provider: 'admin',
+            model: 'qwen2.5-32b-instruct'
+          });
+          // Remove from KV open map if present
+          if (openMap && openMap[symbol]) { delete (openMap as any)[symbol]; await setOpenTrades(env, url, openMap as any); }
+        }
+      } catch (e: any) {
+        results.push({ symbol, error: String(e?.message || e) });
+      }
+    }
+    return new Response(JSON.stringify({ ok: true, results }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin: append a closed trade manually
+async function handleAppendClosedTrade(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  try {
+    const b = await req.json();
+    const symbol = String(b?.symbol||'');
+    const side = String(b?.side||'').toUpperCase();
+    const qty = Number(b?.qty||0);
+    const entryPrice = Number(b?.entryPrice||0);
+    const exitPrice = Number(b?.exitPrice||0);
+    const openedAt = Number(b?.openedAt||0) || Date.now();
+    const closedAt = Number(b?.closedAt||0) || Date.now();
+    if (!symbol || !['LONG','SHORT'].includes(side) || !(qty>0) || !(entryPrice>0) || !(exitPrice>0)) {
+      return new Response(JSON.stringify({ ok: false, error: 'bad_params' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
+    }
+    const pnlUsd = side==='LONG' ? (exitPrice - entryPrice)*qty : (entryPrice - exitPrice)*qty;
+    await appendClosedTrade(env, url, {
+      symbol,
+      side: side as any,
+      qty,
+      entryPrice,
+      notionalEntry: entryPrice*qty,
+      exitPrice,
+      notionalExit: exitPrice*qty,
+      openedAt,
+      closedAt,
+      holdingMs: Math.max(0, closedAt - openedAt),
+      pnlUsd,
+      provider: 'admin',
+      model: 'qwen2.5-32b-instruct'
+    });
+    return new Response(JSON.stringify({ ok: true }), { headers: cors({ 'Content-Type': 'application/json' }) });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
   }
 }
 
@@ -1332,9 +1798,48 @@ export default {
     if (url.pathname === '/api/vibe/positions' && req.method === 'GET') return handleVibePositions(req, env);
     if (url.pathname === '/api/vibe/balances' && req.method === 'GET') return handleVibeBalances(req, env);
     if (url.pathname === '/api/vibe/equity' && req.method === 'GET') {
-      const eq = (await env.MEAP_KV.get(new URL('/vibe_equity.json', url).toString(), { type: 'json' })) || [];
-    return new Response(JSON.stringify({ equity: Array.isArray(eq) ? eq.slice(-1000) : [] }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
+      // Read pinned anchor (if any)
+      const anchor = (await env.MEAP_KV.get(new URL('/vibe_chart_anchor.json', url).toString(), { type: 'json' })) as any;
+      const anchorAt = Number(anchor?.at || 0);
+      const anchorVal = Number(anchor?.equityUsd || 0);
+      // Load rolling buffer
+      const rolling: any[] = (await env.MEAP_KV.get(new URL('/vibe_equity.json', url).toString(), { type: 'json' })) || [];
+      if (anchorAt > 0) {
+        // Load daily shards from anchor day through today
+        const days: string[] = [];
+        const start = new Date(anchorAt);
+        const end = new Date();
+        for (let d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate())); d <= end; d = new Date(d.getTime() + 86400000)) {
+          const yyyy = d.getUTCFullYear();
+          const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const dd = String(d.getUTCDate()).padStart(2, '0');
+          days.push(`/vibe_equity_${yyyy}-${mm}-${dd}.json`);
+        }
+        const parts: any[][] = [];
+        for (const k of days) {
+          const arr = (await env.MEAP_KV.get(new URL(k, url).toString(), { type: 'json' })) as any[];
+          if (Array.isArray(arr) && arr.length) parts.push(arr);
+        }
+        // Union: daily + rolling from anchor forward; de-dup by 'at'
+        const union = ([] as any[]).concat(...parts, Array.isArray(rolling) ? rolling : [])
+          .filter(p => Number(p?.at) >= anchorAt);
+        // Ensure anchor point exists (without overwriting values)
+        if (anchorVal > 0 && !union.some(p => Number(p.at) === anchorAt)) union.push({ at: anchorAt, equityUsd: anchorVal });
+        const byAt = new Map<number, any>();
+        for (const p of union) {
+          const at = Number(p?.at);
+          if (!Number.isFinite(at)) continue;
+          if (!byAt.has(at)) byAt.set(at, p);
+        }
+        const all = Array.from(byAt.values()).sort((a, b) => Number(a.at) - Number(b.at));
+        return new Response(JSON.stringify({ equity: all }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
+      }
+      // No anchor: return rolling as-is
+      return new Response(JSON.stringify({ equity: Array.isArray(rolling) ? rolling : [] }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
     }
+    // Temporary mutation routes disabled after final smoothing pass
+    if (url.pathname === '/api/vibe/anchor/scan-nearest' && req.method === 'POST') return handleScanNearestAnchor(req, env);
+    if (url.pathname === '/api/vibe/anchor/set' && req.method === 'POST') return handleSetAnchor(req, env);
     if (url.pathname === '/api/vibe/trades' && req.method === 'GET') {
       const list = (await env.MEAP_KV.get(new URL('/vibe_trades.json', url).toString(), { type: 'json' })) || [];
       return new Response(JSON.stringify({ trades: list }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
@@ -1355,6 +1860,14 @@ export default {
       } catch (e: any) { results.positions = { error: String(e?.message || e) }; }
       return new Response(JSON.stringify(results, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
     }
+    // Admin: list old open trades (by bot-tracked openedAt)
+    if (url.pathname === '/api/vibe/old-open-trades' && req.method === 'GET') return handleVibeOldOpenTrades(req, env);
+    // Admin: close old open trades (reduce-only market)
+    if (url.pathname === '/api/vibe/close-old-open-trades' && req.method === 'POST') return handleVibeCloseOldOpenTrades(req, env);
+    // Admin: close ALL live exchange positions (reduce-only market)
+    if (url.pathname === '/api/vibe/close-all-positions' && req.method === 'POST') return handleVibeCloseAllPositions(req, env);
+    // Admin: append a closed trade manually
+    if (url.pathname === '/api/vibe/trades/append-closed' && req.method === 'POST') return handleAppendClosedTrade(req, env);
     if (url.pathname === '/api/vibe/tickers' && req.method === 'GET') return handleVibeTickers(req, env);
     if (url.pathname === '/api/vibe/aster-debug' && req.method === 'GET') {
       const hasPriv = !!env.ASTER_PRIVATE_KEY;

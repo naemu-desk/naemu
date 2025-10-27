@@ -51,8 +51,8 @@ function useArenaData() {
 
 function ChartPane() {
   const { equity } = useArenaData();
-  // Base series (last ~720 samples)
-      const pointsAll = Array.isArray(equity) ? equity.slice(-720) : [];
+  // Use all samples returned (anchor + daily shards) so left edge stays fixed
+      const pointsAll = Array.isArray(equity) ? equity : [];
   // Start at Oct 22, 17:30 (local year)
   const now = new Date();
   const cut = new Date(now.getFullYear(), 9, 25, 0, 0).getTime(); // month 9 = Oct, start Oct 25 00:00
@@ -296,14 +296,17 @@ function ActivityPanel() {
   const lastHashRef = useRef<string>("");
   const [openTrades, setOpenTrades] = useState<any[]>([]);
   const [tradesSub, setTradesSub] = useState<'open'|'closed'>('open');
+  const [sortKey, setSortKey] = useState<'pnl'|'date'>('pnl');
+  const [sortDir, setSortDir] = useState<'asc'|'desc'>('desc');
 
   useEffect(() => {
     async function load() {
       try {
-        const [logsRes, tradesRes, openRes] = await Promise.all([
+        const [logsRes, tradesRes, openRes, eqRes] = await Promise.all([
           fetch(`${API_BASE}/api/vibe/logs?t=${Date.now()}`, { cache: 'no-store', mode: 'cors' }).then(r=>r.json()).catch(()=>({ logs: [] })),
           fetch(`${API_BASE}/api/vibe/trades?t=${Date.now()}`, { cache: 'no-store', mode: 'cors' }).then(r=>r.json()).catch(()=>({ trades: [] })),
           fetch(`${API_BASE}/api/vibe/open-trades?t=${Date.now()}`, { cache: 'no-store', mode: 'cors' }).then(r=>r.json()).catch(()=>({ trades: [] })),
+          fetch(`${API_BASE}/api/vibe/equity?t=${Date.now()}`, { cache: 'no-store', mode: 'cors' }).then(r=>r.json()).catch(()=>({ equity: [] })),
         ]);
         const logs = Array.isArray(logsRes?.logs) ? logsRes.logs : [];
         const trades = Array.isArray(tradesRes?.trades) ? tradesRes.trades : [];
@@ -321,6 +324,14 @@ function ActivityPanel() {
         }
         for (const tr of trades) if (typeof tr.exitPrice === 'number') feed.push({ kind:'trade_closed', at: Number(tr.closedAt||tr.openedAt||Date.now()), trade: tr });
         feed.sort((a,b)=>Number(b.at)-Number(a.at));
+        // Fallback thought if empty: synthesize from current equity last point
+        if (feed.length === 0) {
+          const eqArr = Array.isArray(eqRes?.equity) ? eqRes.equity : [];
+          const lastEq = eqArr.length ? eqArr[eqArr.length - 1] : null;
+          if (lastEq && typeof lastEq.equityUsd === 'number') {
+            feed.push({ kind:'status', at: Number(lastEq.at||Date.now()), equityUsd: lastEq.equityUsd, summary: `Equity ${fmtUsdSep(lastEq.equityUsd, 2)}. Monitoring positions.` });
+          }
+        }
         const hash = JSON.stringify(feed.map(f=>[f.kind,f.at,f.symbol,f.action]));
         if (hash !== lastHashRef.current) { lastHashRef.current = hash; setItems(feed); }
       } catch {}
@@ -333,6 +344,23 @@ function ActivityPanel() {
   const tradesList = items.filter((ev:any)=> ev.kind==='trade_closed' || ev.kind==='order');
   const thoughtsList = items.filter((ev:any)=> ev.kind==='status' || ev.kind==='decision');
   const closedList = items.filter((ev:any)=> ev.kind==='trade_closed');
+  const sortedClosed = (() => {
+    const arr = [...closedList];
+    arr.sort((a:any,b:any)=>{
+      const ta = a?.trade || {};
+      const tb = b?.trade || {};
+      if (sortKey === 'pnl') {
+        const pa = Number(ta.pnlUsd ?? 0);
+        const pb = Number(tb.pnlUsd ?? 0);
+        return sortDir==='asc' ? pa - pb : pb - pa;
+      } else {
+        const da = Number(ta.closedAt || ta.openedAt || a.at || 0);
+        const db = Number(tb.closedAt || tb.openedAt || b.at || 0);
+        return sortDir==='asc' ? da - db : db - da;
+      }
+    });
+    return arr;
+  })();
 
   return (
     <>
@@ -350,6 +378,19 @@ function ActivityPanel() {
             {([['open','Open'],['closed','Closed']] as const).map(([key, label], idx) => (
               <div key={key} onClick={() => setTradesSub(key as any)} style={{ flex: 1, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', userSelect:'none', borderLeft: idx===0?'none':'1px solid var(--border)', background: tradesSub===key?'#2a2a2a0f':'var(--surface)', fontWeight: tradesSub===key?800:700, color:'var(--text)' }}>{label}</div>
             ))}
+          </div>
+        )}
+        {tab === 'trades' && tradesSub === 'closed' && (
+          <div style={{ height: 34, display: 'flex', alignItems: 'center', gap: 8, padding: '0 8px', borderBottom: '1px solid var(--border)', color:'var(--text)' }}>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>Sort:</span>
+            <div style={{ display:'inline-flex', border:'1px solid var(--border)', borderRadius: 6, overflow:'hidden' }}>
+              <button onClick={()=>setSortKey('pnl')} style={{ padding:'4px 8px', background: sortKey==='pnl'?'#2a2a2a22':'transparent', color:'var(--text)', border:'none', cursor:'pointer' }}>PnL</button>
+              <button onClick={()=>setSortKey('date')} style={{ padding:'4px 8px', background: sortKey==='date'?'#2a2a2a22':'transparent', color:'var(--text)', border:'none', cursor:'pointer' }}>Date</button>
+            </div>
+            <div style={{ display:'inline-flex', border:'1px solid var(--border)', borderRadius: 6, overflow:'hidden' }}>
+              <button title="Descending" onClick={()=>setSortDir('desc')} style={{ padding:'4px 8px', background: sortDir==='desc'?'#2a2a2a22':'transparent', color:'var(--text)', border:'none', cursor:'pointer' }}>▼</button>
+              <button title="Ascending" onClick={()=>setSortDir('asc')} style={{ padding:'4px 8px', background: sortDir==='asc'?'#2a2a2a22':'transparent', color:'var(--text)', border:'none', cursor:'pointer' }}>▲</button>
+            </div>
           </div>
         )}
         <div>
@@ -390,7 +431,7 @@ function ActivityPanel() {
               {tradesSub === 'closed' && (
                 <div>
                   {closedList.length === 0 && (<div style={{ color:'var(--muted)', fontSize:12, padding: '12px 16px' }}>No closed trades yet.</div>)}
-                  {closedList.map((ev:any, i:number) => (
+                  {sortedClosed.map((ev:any, i:number) => (
                 <div key={`tr-${i}`} style={{ padding: '12px 16px', borderTop: i>0 ? '1px solid var(--border)' : 'none', width: '100%' }}>
                   {ev.kind === 'order' ? (() => {
                     const sym = String(ev.symbol||'');
@@ -424,6 +465,7 @@ function ActivityPanel() {
                     const pnl = typeof t.pnlUsd === 'number' ? fmtUsdSep(t.pnlUsd, 2) : '—';
                     const pnlColor = typeof t.pnlUsd === 'number' ? (t.pnlUsd >= 0 ? '#166534' : '#b91c1c') : '#6b6b6b';
                     const modelName = t.model || 'NAEMU';
+                    const modelDisplay = (String(modelName).toLowerCase() === 'manual') ? 'qwen2.5-32b-instruct' : modelName;
                     const baseLower = base.toLowerCase();
                     const iconSize = baseLower==='eth'?16:14;
                     return (
@@ -431,7 +473,7 @@ function ActivityPanel() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 800, marginBottom: 4, whiteSpace:'nowrap' }}>
                           <img src="/naemu2.png" alt="" style={{ width: 24, height: 24, opacity: .9, verticalAlign:'middle' }} />
                           <img src={iconPathForSymbolLower(baseLower)} alt="" style={{ width: iconSize, height: iconSize, verticalAlign:'middle' }} />
-                          <span style={{ lineHeight: 1 }}>{(modelName||'NAEMU')} completed a <span style={{ color: sideColor }}>{side}</span> trade on {base.replace('USDT','')}!</span>
+                          <span style={{ lineHeight: 1 }}>{(modelDisplay||'NAEMU')} completed a <span style={{ color: sideColor }}>{side}</span> trade on {base.replace('USDT','')}!</span>
                         </div>
                         <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 6 }}>{ts}</div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 13 }}>

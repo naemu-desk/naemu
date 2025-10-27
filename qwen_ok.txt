@@ -1,0 +1,38 @@
+* Host dashscope-intl.aliyuncs.com:443 was resolved.
+* IPv6: (none)
+* IPv4: 47.236.175.160, 47.245.114.142
+*   Trying 47.236.175.160:443...
+* schannel: disabled automatic use of client certificate
+* ALPN: curl offers http/1.1
+* ALPN: server accepted http/1.1
+* Connected to dashscope-intl.aliyuncs.com (47.236.175.160) port 443
+* using HTTP/1.x
+> POST /compatible-mode/v1/chat/completions HTTP/1.1
+> Host: dashscope-intl.aliyuncs.com
+> User-Agent: curl/8.14.1
+> Accept: */*
+> Authorization: Bearer sk-4ddfef05fe734230bca32daef341c11b
+> Content-Type: application/json
+> Content-Length: 154
+> 
+} [154 bytes data]
+* upload completely sent off: 154 bytes
+* schannel: remote party requests renegotiation
+* schannel: renegotiating SSL/TLS connection
+* schannel: SSL/TLS connection renegotiated
+< HTTP/1.1 403 Forbidden
+< vary: Origin,Access-Control-Request-Method,Access-Control-Request-Headers, Accept-Encoding
+< x-request-id: efa99d01-90dc-90a4-8131-3383e7b457ec
+< content-type: application/json
+< content-length: 396
+< req-cost-time: 51
+< req-arrive-time: 1761531008792
+< resp-start-time: 1761531008843
+< x-envoy-upstream-service-time: 51
+< set-cookie: acw_tc=efa99d01-90dc-90a4-8131-3383e7b457ec5dfac1cff051129970b829cbfa9e3733;path=/;HttpOnly;Max-Age=1800
+< date: Mon, 27 Oct 2025 02:10:08 GMT
+< server: istio-envoy
+< 
+{ [396 bytes data]
+* Connection #0 to host dashscope-intl.aliyuncs.com left intact
+{"error":{"code":"AllocationQuota.FreeTierOnly","param":null,"message":"The free tier of the model has been exhausted. If you wish to continue access the model on a paid basis, please disable the \"use free tier only\" mode in the management console.","type":"AllocationQuota.FreeTierOnly"},"id":"chatcmpl-efa99d01-90dc-90a4-8131-3383e7b457ec","request_id":"efa99d01-90dc-90a4-8131-3383e7b457ec"}
