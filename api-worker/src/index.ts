@@ -376,6 +376,7 @@ type VibeConfig = {
   leverageCap: number;
   marginMode: 'cross' | 'isolated';
   model: string;
+  maxLossPerTradeUsd?: number; // hard dollar stop per trade
 };
 
 type VibeRuntime = {
@@ -391,12 +392,13 @@ type VibeRuntime = {
 const DEFAULT_VIBE_CONFIG: VibeConfig = {
   status: 'running',
   universe: ['BTCUSDT','ETHUSDT','BNBUSDT','XRPUSDT','DOGEUSDT','SOLUSDT','ASTERUSDT','CAKEUSDT','ZORAUSDT','PUMPUSDT','ZECUSDT'],
-  maxRiskPerTradeUsd: 500, // increased default risk cap
+  maxRiskPerTradeUsd: 1500, // increased default risk cap for more visible PnL swings
   maxDailyLossUsd: 2000,
   maxExposureUsd: 10000,
   leverageCap: 5,
   marginMode: 'cross',
-  model: 'qwen2.5-32b-instruct'
+  model: 'qwen2.5-32b-instruct',
+  maxLossPerTradeUsd: 200
 };
 
 async function kvGetJson<T>(env: Env, url: URL, key: string, fallback: T): Promise<T> {
@@ -462,7 +464,8 @@ async function setOpenTrades(env: Env, url: URL, map: Record<string, OpenTrade>)
 async function appendClosedTrade(env: Env, url: URL, trade: ClosedTrade) {
   const list = await kvGetJson<ClosedTrade[]>(env, url, '/vibe_trades.json', []);
   list.push(trade);
-  if (list.length > 200) list.splice(0, list.length - 200);
+  // Keep last 2000 trades instead of 200 to preserve history (especially high-PnL trades)
+  if (list.length > 2000) list.splice(0, list.length - 2000);
   await kvPutJson(env, url, '/vibe_trades.json', list);
 }
 
@@ -492,7 +495,8 @@ async function handleVibeRun(req: Request, env: Env) {
     maxExposureUsd: Number(body?.maxExposureUsd ?? cfg.maxExposureUsd),
     leverageCap: Number(body?.leverageCap ?? cfg.leverageCap),
     marginMode: body?.marginMode === 'isolated' ? 'isolated' : 'cross',
-    model: typeof body?.model === 'string' && body.model ? body.model : cfg.model
+    model: typeof body?.model === 'string' && body.model ? body.model : cfg.model,
+    maxLossPerTradeUsd: Number(body?.maxLossPerTradeUsd ?? cfg.maxLossPerTradeUsd)
   };
   await kvPutJson(env, url, '/vibe_config.json', next);
   await appendLog(env, url, { type: 'vibe_status', status: 'running' });
@@ -520,17 +524,21 @@ async function callLLMDecider(env: Env, state: any, cfg: VibeConfig): Promise<an
   if (!apiKey) throw new Error('LLM_API_KEY missing');
   const baseUrl = (env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '');
   let model = cfg.model || 'qwen2.5-32b-instruct';
-  const sys = `You are an intraday futures trading decider focused strictly on 1–15 minute horizons.
-Use short‑term orderflow/price-action context. You are given per-symbol indicators: ema9, ema21, rsi14, atr14, vwap, rangePct, plus prices and change24h.
-All numeric levels you output must be anchored near current price (~0.5%–3% typical). If no clear edge, choose FLAT.
+  const sys = `You are a selective intraday futures trading decider. Only take trades when there is a CLEAR, HIGH-CONVICTION setup with favorable risk/reward (minimum 2:1 R:R ratio).
+You are given per-symbol indicators: ema9, ema21, rsi14, atr14, vwap, rangePct, plus prices and change24h.
+CRITICAL RULES:
+- Only trade when multiple indicators align (e.g., RSI oversold/overbought + EMA crossover + price near VWAP support/resistance)
+- Require a clear thesis with at least 2:1 reward-to-risk ratio (distance to TP should be at least 2x distance to SL)
+- If no clear edge exists, choose FLAT. It is better to miss trades than to take low-quality setups.
+- All numeric levels must be anchored near current price (~0.5%–3% typical)
 Output strict JSON with keys:
-- action: one of LONG, SHORT, FLAT
+- action: one of LONG, SHORT, FLAT (default to FLAT unless high conviction)
 - symbol: one of ${cfg.universe.join(', ')}
-- size_usd: number (<= maxRiskPerTradeUsd=${cfg.maxRiskPerTradeUsd}, and reasonable vs equity)
-- thesis: concise short‑term setup
-- stop_loss_price: number (hard invalidation near entry)
-- take_profit_price: number (near‑term target)
-- min_hold_minutes: number between 10 and 180
+- size_usd: number (target 40-60% of equity, <= maxRiskPerTradeUsd=${cfg.maxRiskPerTradeUsd})
+- thesis: concise high-conviction setup explanation (must justify why this is better than FLAT)
+- stop_loss_price: number (hard invalidation near entry, typically 0.5-1.5% away)
+- take_profit_price: number (target at least 2x the SL distance from entry)
+- min_hold_minutes: number between 15 and 90 (longer holds for better setups)
 Respect risk limits: maxRiskPerTradeUsd=${cfg.maxRiskPerTradeUsd}, maxExposureUsd=${cfg.maxExposureUsd}.`;
   const user = { role: 'user', content: `State: ${JSON.stringify(state).slice(0, 9000)}` } as const;
   const r = await fetch(`${baseUrl}/chat/completions`, {
@@ -642,22 +650,79 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
           shouldClose = true; reason = 'Take-profit hit';
         }
       }
+      // Hard dollar loss cap (ignores min-hold)
+      if (!shouldClose && typeof cfg.maxLossPerTradeUsd === 'number' && cfg.maxLossPerTradeUsd > 0) {
+        const pnlNow = t.side === 'LONG' ? (price - t.entryPrice) * t.qty : (t.entryPrice - price) * t.qty;
+        if (Number.isFinite(pnlNow) && pnlNow <= -Math.abs(cfg.maxLossPerTradeUsd)) {
+          shouldClose = true; reason = `Max loss ${-Math.abs(cfg.maxLossPerTradeUsd)} hit`;
+        }
+      }
       if (shouldClose) {
-        const side = t.side === 'LONG' ? 'SELL' : 'BUY';
-        const r = await asterFapiSignedPost(env, '/fapi/v1/order', { symbol: sym, side, type: 'MARKET', quantity: t.qty, reduceOnly: 'true' });
-        const txt = await r.text();
-        const body = (() => { try { return JSON.parse(txt); } catch { return { raw: txt }; } })();
-        await appendLog(env, url, { type: 'vibe_order', status: r.status, ok: r.ok, symbol: sym, side, qty: t.qty, notional: Math.abs(t.qty * price), reason, body });
-        if (r.ok) {
-          const pnlUsd = t.side === 'LONG' ? (price - t.entryPrice) * t.qty : (t.entryPrice - price) * t.qty;
+        // Robust close: use live positionAmt, stepSize rounding, poll until flat, single aggregated Closed trade
+        const base = (env.ASTER_API_BASE || '').trim();
+        const apiKey = (env as any).ASTER_API_KEY;
+        const apiSecret = (env as any).ASTER_API_SECRET;
+        let totalQtyClosed = 0;
+        let sumNotionalExit = 0;
+        let lastExitPrice = price;
+        let attempts = 0;
+        // Preload exchangeInfo for step size
+        let step = 0.0001;
+        try {
+          const info = await getExchangeInfo(env);
+          step = stepSizeForSymbol(info, sym).step;
+        } catch {}
+        const fetchPos = async () => {
+          const ts = Date.now();
+          const recv = 5000;
+          const q = `timestamp=${ts}&recvWindow=${recv}`;
+          const sig = await hmacHex('SHA-256', apiSecret, q);
+          const r = await fetch(`${base}/fapi/v2/positionRisk?${q}&signature=${sig}`, { headers: { 'X-MBX-APIKEY': apiKey } });
+          const txt = await r.text();
+          const arr = (()=>{ try { return JSON.parse(txt); } catch { return null; } })();
+          const list = Array.isArray(arr) ? arr : [];
+          return list.find((p:any)=> String(p?.symbol||'')===sym) || null;
+        };
+        while (attempts < 8) {
+          attempts++;
+          const p = base && apiKey && apiSecret ? await fetchPos() : null;
+          const amt = Number(p?.positionAmt || 0);
+          if (!p || Math.abs(amt) <= 0) break;
+          const side = amt > 0 ? 'SELL' : 'BUY';
+          const qtyRaw = Math.abs(amt);
+          const steps = Math.max(1, Math.floor(qtyRaw / step));
+          const qty = steps * step;
+          if (!(qty > 0)) break;
+          const res = await asterFapiSignedPost(env, '/fapi/v1/order', { symbol: sym, side, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
+          const resTxt = await res.text();
+          const resBody = (()=>{ try { return JSON.parse(resTxt); } catch { return { raw: resTxt }; } })();
+          await appendLog(env, url, { type: 'vibe_order', status: res.status, ok: res.ok, symbol: sym, side, qty, notional: qty * (Number(resBody?.avgPrice||resBody?.price||price)||price), reason, body: resBody });
+          if (res.ok) {
+            const px = Number(resBody?.avgPrice || resBody?.price || price) || price;
+            totalQtyClosed += qty;
+            sumNotionalExit += px * qty;
+            lastExitPrice = px;
+          }
+          // small delay before polling again
+          await new Promise(r => setTimeout(r, 500));
+        }
+        // Final check: are we flat?
+        let finalAmt = 0;
+        try {
+          const p = base && apiKey && apiSecret ? await fetchPos() : null;
+          finalAmt = Number(p?.positionAmt || 0);
+        } catch {}
+        if (Math.abs(finalAmt) <= 0 && totalQtyClosed > 0) {
+          const exitPrice = totalQtyClosed > 0 ? (sumNotionalExit / totalQtyClosed) : lastExitPrice;
+          const pnlUsd = t.side === 'LONG' ? (exitPrice - t.entryPrice) * totalQtyClosed : (t.entryPrice - exitPrice) * totalQtyClosed;
           const closed: ClosedTrade = {
             symbol: sym,
             side: t.side,
-            qty: t.qty,
+            qty: totalQtyClosed,
             entryPrice: t.entryPrice,
-            exitPrice: price,
-            notionalEntry: t.notionalEntry,
-            notionalExit: Math.abs(t.qty * price),
+            exitPrice,
+            notionalEntry: t.entryPrice * totalQtyClosed,
+            notionalExit: exitPrice * totalQtyClosed,
             openedAt: t.openedAt,
             closedAt: now,
             holdingMs: Math.max(0, now - t.openedAt),
@@ -689,9 +754,8 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
     await appendLog(env, url, { type: 'vibe_prompt', provider: meta.provider, model: meta.model, sys: meta.sys, state: { equityUsd: state.balances.equityUsd, positionsCount: state.positions.length } });
     selectedSymbol = typeof llm.parsed?.symbol === 'string' && cfg.universe.includes(llm.parsed.symbol) ? llm.parsed.symbol : cfg.universe[0];
     selectedAction = (['LONG','SHORT','FLAT'].includes(llm.parsed?.action) ? llm.parsed.action : 'FLAT') as any;
-    // Size clamp: target 10% of equity up to maxRiskPerTradeUsd
-    // take larger trades (20% of equity) but still respect config caps
-    const targetRisk = Math.max(0, Math.floor((state.balances?.equityUsd || availableBalance) * 0.20));
+    // Size clamp: target 50% of equity for larger, fewer trades (but still respect maxRiskPerTradeUsd cap)
+    const targetRisk = Math.max(0, Math.floor((state.balances?.equityUsd || availableBalance) * 0.50));
     const sizeUsd = Math.min(cfg.maxRiskPerTradeUsd, targetRisk);
 
     // Log decision or status (hide repetitive FLAT by converting into status summary)
@@ -827,13 +891,36 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
       lastOutput = log;
     }
 
-    // Execute tiny live order if allowed and balances exist
+    // Execute live order if allowed and balances exist
     try {
       if ((selectedAction === 'LONG' || selectedAction === 'SHORT') && env.ASTER_API_SECRET) {
         const notional = sizeUsd;
         const now = Date.now();
-        const coolOk = !rt.lastOrderAt || now - rt.lastOrderAt > 3 * 60 * 1000;
-        if (coolOk && notional >= 5) {
+        // Longer cooldown: 15 minutes minimum between new positions
+        const coolOk = !rt.lastOrderAt || now - rt.lastOrderAt > 15 * 60 * 1000;
+        // Check if we already have an open position (don't stack positions on different symbols)
+        const openMap = await getOpenTrades(env, url);
+        const hasOpenPositions = Object.keys(openMap).length > 0;
+        const hasOpenOnThisSymbol = openMap[selectedSymbol] !== undefined;
+        // Allow flipping same symbol, but prevent new positions on other symbols if we already have positions
+        const wouldStackPositions = hasOpenPositions && !hasOpenOnThisSymbol;
+        // Check recent closed trades: avoid trading immediately after losses
+        let recentLossCount = 0;
+        let recentLossTotal = 0;
+        try {
+          const closedTrades = await kvGetJson<any[]>(env, url, '/vibe_trades.json', []);
+          const recentWindow = 30 * 60 * 1000; // last 30 minutes
+          for (const t of closedTrades.slice(-10)) {
+            const closedAt = Number(t?.closedAt || 0);
+            if (now - closedAt < recentWindow && Number(t?.pnlUsd || 0) < 0) {
+              recentLossCount++;
+              recentLossTotal += Number(t?.pnlUsd || 0);
+            }
+          }
+        } catch {}
+        // Don't trade if: cooldown not met, would stack positions on different symbols, or just had multiple recent losses
+        const shouldSkip = !coolOk || wouldStackPositions || (recentLossCount >= 2 && recentLossTotal < -50);
+        if (!shouldSkip && notional >= 10) {
           const priceJ = await asterFapiGetPublicJson(env, `/fapi/v1/ticker/price?symbol=${selectedSymbol}`);
           const price = Number(priceJ?.price || 0);
           if (price > 0) {
@@ -1455,50 +1542,79 @@ async function handleVibeCloseAllPositions(req: Request, env: Env) {
     const apiKey = (env as any).ASTER_API_KEY;
     const apiSecret = (env as any).ASTER_API_SECRET;
     if (!base || !apiKey || !apiSecret) return new Response(JSON.stringify({ ok: false, error: 'ASTER_API_BASE/API_KEY/API_SECRET missing' }), { status: 400, headers: cors({ 'Content-Type': 'application/json' }) });
-    // Fetch live positions
-    const ts = Date.now(); const recv = 5000; const query = `timestamp=${ts}&recvWindow=${recv}`; const sig = await hmacHex('SHA-256', apiSecret, query);
-    const r = await fetch(`${base}/fapi/v2/positionRisk?${query}&signature=${sig}`, { headers: { 'X-MBX-APIKEY': apiKey } });
-    const bodyTxt = await r.text(); const arr = (()=>{ try{return JSON.parse(bodyTxt);}catch{return null;} })();
-    const list = Array.isArray(arr) ? arr : [];
+    // Helper: fetch live positions
+    const fetchPositions = async () => {
+      const ts0 = Date.now(); const recv0 = 5000; const q0 = `timestamp=${ts0}&recvWindow=${recv0}`; const sig0 = await hmacHex('SHA-256', apiSecret, q0);
+      const r0 = await fetch(`${base}/fapi/v2/positionRisk?${q0}&signature=${sig0}`, { headers: { 'X-MBX-APIKEY': apiKey } });
+      const txt0 = await r0.text(); const arr0 = (()=>{ try{return JSON.parse(txt0);}catch{return null;} })();
+      return Array.isArray(arr0) ? arr0 : [];
+    };
     const results: any[] = [];
     const openMap = await getOpenTrades(env, url);
-    for (const p of list) {
+    const info = await getExchangeInfo(env);
+    const initialList = await fetchPositions();
+    for (const p of initialList) {
       const symbol = String(p?.symbol||'');
-      const amt = Number(p?.positionAmt||0);
-      if (!symbol || !Number.isFinite(amt) || Math.abs(amt) <= 0) continue;
-      const side = amt > 0 ? 'SELL' : 'BUY';
-      const qty = Math.abs(amt);
       const entryPrice = Number(p?.entryPrice || 0) || 0;
-      try {
-        const orderRes = await asterFapiSignedPost(env, '/fapi/v1/order', { symbol, side, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
-        const ok = orderRes.ok; const txt = await orderRes.text();
-        const parsed = (()=>{ try{return JSON.parse(txt);}catch{return { raw: txt }; }})();
-        results.push({ symbol, qty, side, status: orderRes.status, ok, body: parsed });
-        if (ok) {
-          const closePrice = Number(parsed?.avgPrice || parsed?.price || 0) || 0;
-          const isLong = amt > 0;
-          const pnlUsd = isLong ? (closePrice - entryPrice) * qty : (entryPrice - closePrice) * qty;
-          const nowTs = Date.now();
-          await appendClosedTrade(env, url, {
-            symbol,
-            side: isLong ? 'LONG' : 'SHORT',
-            qty,
-            entryPrice,
-            notionalEntry: entryPrice * qty,
-            exitPrice: closePrice,
-            notionalExit: closePrice * qty,
-            openedAt: nowTs, // unknown from exchange; set to now to avoid nulls
-            closedAt: nowTs,
-            holdingMs: 0,
-            pnlUsd,
-            provider: 'admin',
-            model: 'qwen2.5-32b-instruct'
-          });
-          // Remove from KV open map if present
-          if (openMap && openMap[symbol]) { delete (openMap as any)[symbol]; await setOpenTrades(env, url, openMap as any); }
+      let totalQtyClosed = 0;
+      let sumNotionalExit = 0;
+      let lastExitPrice = Number(p?.markPrice || p?.entryPrice || 0) || 0;
+      const sideNow = Number(p?.positionAmt||0) > 0 ? 'SELL' : 'BUY';
+      const isLong = sideNow === 'SELL'; // if we SELL to close, position was LONG
+      const step = stepSizeForSymbol(info, symbol).step;
+      // Loop: reduce-only orders until flat
+      for (let i=0;i<8;i++) {
+        const listNow = await fetchPositions();
+        const cur = listNow.find((x:any)=> String(x?.symbol||'')===symbol) || null;
+        const amt = Number(cur?.positionAmt||0);
+        if (!Number.isFinite(amt) || Math.abs(amt) <= 0) break;
+        const side = amt > 0 ? 'SELL' : 'BUY';
+        const qtyRaw = Math.abs(amt);
+        const steps = Math.max(1, Math.floor(qtyRaw / step));
+        const qty = steps * step;
+        if (!(qty > 0)) break;
+        try {
+          const orderRes = await asterFapiSignedPost(env, '/fapi/v1/order', { symbol, side, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
+          const ok = orderRes.ok; const txt = await orderRes.text();
+          const parsed = (()=>{ try{return JSON.parse(txt);}catch{return { raw: txt }; }})();
+          results.push({ symbol, qty, side, status: orderRes.status, ok, body: parsed });
+          if (ok) {
+            const px = Number(parsed?.avgPrice || parsed?.price || 0) || lastExitPrice || entryPrice;
+            totalQtyClosed += qty;
+            sumNotionalExit += px * qty;
+            lastExitPrice = px;
+          }
+        } catch (e: any) {
+          results.push({ symbol, error: String(e?.message || e) });
         }
-      } catch (e: any) {
-        results.push({ symbol, error: String(e?.message || e) });
+        await new Promise(r => setTimeout(r, 500));
+      }
+      // Final state
+      const finalList = await fetchPositions();
+      const fin = finalList.find((x:any)=> String(x?.symbol||'')===symbol) || null;
+      const finAmt = Number(fin?.positionAmt||0);
+      if (Math.abs(finAmt) <= 0 && totalQtyClosed > 0) {
+        const closePrice = totalQtyClosed > 0 ? (sumNotionalExit / totalQtyClosed) : lastExitPrice || entryPrice;
+        const pnlUsd = (Number(p?.positionAmt||0) > 0)
+          ? (closePrice - entryPrice) * totalQtyClosed
+          : (entryPrice - closePrice) * totalQtyClosed;
+        const nowTs = Date.now();
+        await appendClosedTrade(env, url, {
+          symbol,
+          side: (Number(p?.positionAmt||0) > 0) ? 'LONG' : 'SHORT',
+          qty: totalQtyClosed,
+          entryPrice,
+          notionalEntry: entryPrice * totalQtyClosed,
+          exitPrice: closePrice,
+          notionalExit: closePrice * totalQtyClosed,
+          openedAt: nowTs,
+          closedAt: nowTs,
+          holdingMs: 0,
+          pnlUsd,
+          provider: 'admin',
+          model: 'qwen2.5-32b-instruct'
+        });
+        if (openMap && openMap[symbol]) { delete (openMap as any)[symbol]; await setOpenTrades(env, url, openMap as any); }
       }
     }
     return new Response(JSON.stringify({ ok: true, results }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
@@ -1544,6 +1660,88 @@ async function handleAppendClosedTrade(req: Request, env: Env) {
     return new Response(JSON.stringify({ ok: true }), { headers: cors({ 'Content-Type': 'application/json' }) });
   } catch (e: any) {
     return new Response(JSON.stringify({ ok: false, error: String(e?.message || e) }), { status: 500, headers: cors({ 'Content-Type': 'application/json' }) });
+  }
+}
+
+// Admin: backfill closed trades from realized income entries (funding, commission, realized PnL)
+// This approximates missing closes when fills are not returned by reconstruct.
+async function handleBackfillTradesIncome(req: Request, env: Env) {
+  const url = new URL(req.url);
+  const admin = env.ADMIN_KEY;
+  const key = req.headers.get('x-admin-key') || '';
+  if (!admin || key !== admin) return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403, headers: cors({ 'Content-Type': 'application/json' }) });
+  try {
+    const body = await req.json().catch(()=>({}));
+    const from = Number(body?.from||0);
+    const to = Number(body?.to||Date.now());
+    if (!(to>from && Number.isFinite(from))) return new Response(JSON.stringify({ ok:false, error:'bad_range' }), { status:400, headers: cors({ 'Content-Type':'application/json' }) });
+    const base = (env.ASTER_API_BASE || '').trim();
+    const apiKey = (env as any).ASTER_API_KEY;
+    const apiSecret = (env as any).ASTER_API_SECRET;
+    if (!base || !apiKey || !apiSecret) return new Response(JSON.stringify({ ok:false, error:'ASTER_API_BASE/API_KEY/API_SECRET missing' }), { status:400, headers: cors({ 'Content-Type':'application/json' }) });
+    // Pull income (realized PnL) over window
+    const q = `timestamp=${Date.now()}&recvWindow=5000&startTime=${from}&endTime=${to}`;
+    const sig = await hmacHex('SHA-256', apiSecret, q);
+    const r = await fetch(`${base}/fapi/v1/income?${q}&signature=${sig}`, { headers: { 'X-MBX-APIKEY': apiKey } });
+    const txt = await r.text(); const arr = (()=>{ try{return JSON.parse(txt);}catch{return null;} })();
+    const income = Array.isArray(arr) ? arr : [];
+    // Filter realized PnL entries and group by symbol/time proximity
+    const realized = income.filter((x:any)=> String(x?.incomeType||'').toUpperCase()==='REALIZED_PNL');
+    const bySym: Record<string, any[]> = {};
+    for (const e of realized) {
+      const sym = String(e?.symbol||'');
+      if (!sym) continue;
+      (bySym[sym] = bySym[sym] || []).push(e);
+    }
+    let added = 0;
+    for (const [sym, list] of Object.entries(bySym)) {
+      // Aggregate entries within 3s windows as one close
+      list.sort((a:any,b:any)=> Number(a.time||0) - Number(b.time||0));
+      let bucket:any[] = [];
+      const flush = async () => {
+        if (!bucket.length) return;
+        const pnl = bucket.reduce((s,e)=> s + Number(e.income||0), 0);
+        const closedAt = Number(bucket[bucket.length-1].time||Date.now());
+        // We don't know entry/exit prices here; approximate from last price
+        // Fetch mark price once
+        let exitPrice = 0; try { const tick = await asterFapiGetPublicJson(env, `/fapi/v1/ticker/price?symbol=${sym}`); exitPrice = Number(tick?.price||0)||0; } catch {}
+        // Use Kv open map for entry if present; else skip
+        const openMap = await getOpenTrades(env, url);
+        const t = openMap[sym];
+        if (!t || !(t.qty>0) || !(t.entryPrice>0)) { bucket = []; return; }
+        const qty = Number(t.qty||0);
+        const entryPrice = Number(t.entryPrice||0);
+        const side = String(t.side||'LONG');
+        await appendClosedTrade(env, url, {
+          symbol: sym,
+          side: side as any,
+          qty,
+          entryPrice,
+          notionalEntry: entryPrice*qty,
+          exitPrice: exitPrice||entryPrice,
+          notionalExit: (exitPrice||entryPrice)*qty,
+          openedAt: Number(t.openedAt||closedAt),
+          closedAt,
+          holdingMs: Math.max(0, closedAt - Number(t.openedAt||closedAt)),
+          pnlUsd: pnl,
+          provider: 'admin',
+          model: 'qwen2.5-32b-instruct'
+        });
+        delete (openMap as any)[sym]; await setOpenTrades(env, url, openMap as any);
+        added++;
+        bucket = [];
+      };
+      let lastT = 0;
+      for (const e of list) {
+        const tms = Number(e.time||0);
+        if (!bucket.length || (tms - lastT) <= 3000) { bucket.push(e); lastT = tms; }
+        else { await flush(); bucket.push(e); lastT = tms; }
+      }
+      await flush();
+    }
+    return new Response(JSON.stringify({ ok:true, added }, null, 2), { headers: cors({ 'Content-Type':'application/json' }) });
+  } catch (e:any) {
+    return new Response(JSON.stringify({ ok:false, error:String(e?.message||e) }), { status:500, headers: cors({ 'Content-Type':'application/json' }) });
   }
 }
 
@@ -1844,6 +2042,23 @@ export default {
       const list = (await env.MEAP_KV.get(new URL('/vibe_trades.json', url).toString(), { type: 'json' })) || [];
       return new Response(JSON.stringify({ trades: list }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
     }
+    // Debug: trade statistics
+    if (url.pathname === '/api/vibe/trades/stats' && req.method === 'GET') {
+      const list: any[] = (await env.MEAP_KV.get(new URL('/vibe_trades.json', url).toString(), { type: 'json' })) || [];
+      const valid = list.filter(t => typeof t?.pnlUsd === 'number');
+      const pnls = valid.map(t => Number(t.pnlUsd));
+      const sorted = [...pnls].sort((a, b) => b - a);
+      const stats = {
+        total: list.length,
+        valid: valid.length,
+        maxPnL: sorted.length > 0 ? sorted[0] : null,
+        minPnL: sorted.length > 0 ? sorted[sorted.length - 1] : null,
+        top10: sorted.slice(0, 10),
+        sum: pnls.reduce((a, b) => a + b, 0),
+        avg: pnls.length > 0 ? pnls.reduce((a, b) => a + b, 0) / pnls.length : 0
+      };
+      return new Response(JSON.stringify({ stats, sampleTrades: valid.slice(-5) }, null, 2), { headers: cors({ 'Content-Type': 'application/json' }) });
+    }
     if (url.pathname === '/api/vibe/backfill-trades' && req.method === 'POST') return handleVibeBackfillTrades(req, env);
     if (url.pathname === '/api/vibe/open-trades' && req.method === 'GET') return handleVibeOpenTrades(req, env);
     if (url.pathname === '/api/vibe/prices' && req.method === 'GET') return handleVibePrices(req, env);
@@ -1868,6 +2083,8 @@ export default {
     if (url.pathname === '/api/vibe/close-all-positions' && req.method === 'POST') return handleVibeCloseAllPositions(req, env);
     // Admin: append a closed trade manually
     if (url.pathname === '/api/vibe/trades/append-closed' && req.method === 'POST') return handleAppendClosedTrade(req, env);
+    // Admin: backfill closed trades from realized income entries
+    if (url.pathname === '/api/vibe/backfill-trades-income' && req.method === 'POST') return handleBackfillTradesIncome(req, env);
     if (url.pathname === '/api/vibe/tickers' && req.method === 'GET') return handleVibeTickers(req, env);
     if (url.pathname === '/api/vibe/aster-debug' && req.method === 'GET') {
       const hasPriv = !!env.ASTER_PRIVATE_KEY;

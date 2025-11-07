@@ -1,0 +1,67 @@
+{
+  "trades": [
+    {
+      "symbol": "BNBUSDT",
+      "side": "SHORT",
+      "qty": 0.34,
+      "entryPrice": 1140.425548589,
+      "currentPrice": 1134.85,
+      "unrealizedUsd": 1.89568651,
+      "openedAt": 1761607175405
+    },
+    {
+      "symbol": "ZECUSDT",
+      "side": "LONG",
+      "qty": 11.324,
+      "entryPrice": 358.5129524266,
+      "currentPrice": 339.91722386,
+      "unrealizedUsd": -210.57803021,
+      "openedAt": 1761607175405
+    },
+    {
+      "symbol": "XRPUSDT",
+      "side": "LONG",
+      "qty": 150.5,
+      "entryPrice": 2.674240404837,
+      "currentPrice": 2.63709821,
+      "unrealizedUsd": -5.58989959,
+      "openedAt": 1761607175405
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": "LONG",
+      "qty": 0.025,
+      "entryPrice": 4137.527777778,
+      "currentPrice": 4112.45,
+      "unrealizedUsd": -0.62694444,
+      "openedAt": 1761607175405
+    },
+    {
+      "symbol": "CAKEUSDT",
+      "side": "SHORT",
+      "qty": 1,
+      "entryPrice": 2.791,
+      "currentPrice": 2.68126775,
+      "unrealizedUsd": 0.10973225,
+      "openedAt": 1761607175405
+    },
+    {
+      "symbol": "BTCUSDT",
+      "side": "SHORT",
+      "qty": 0.002,
+      "entryPrice": 113966.2,
+      "currentPrice": 113961.89169565,
+      "unrealizedUsd": 0.0086166,
+      "openedAt": 1761607175405
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "side": "SHORT",
+      "qty": 1142.71,
+      "entryPrice": 1.085351195278,
+      "currentPrice": 1.06837007,
+      "unrealizedUsd": 19.40449563,
+      "openedAt": 1761607175405
+    }
+  ]
+}

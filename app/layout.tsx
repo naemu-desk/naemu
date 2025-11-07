@@ -1,4 +1,5 @@
 import './globals.css';
+import ThemeToggle from './components/ThemeToggle';
 
 export const metadata = {
   title: 'NAEMU — Intraday Futures Agent',
@@ -39,9 +40,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <header className="topbar">
-          <a className="brand" href="/" style={{ gap: 6 }}>
-            <img src="/naemu2.png" alt="" height={22} style={{ display: 'block' }} />
-            <strong style={{ marginLeft: 6 }}>NAEMU</strong>
+          <a className="brand" href="/" style={{ gap: 6, display:'inline-flex', alignItems:'center' }}>
+            <img src="/naemufav.png" alt="" height={33} style={{ display: 'block' }} />
+            <strong style={{ marginLeft: 6 }}>奈木 (NAEMU)</strong>
             <span className="beta" style={{ marginLeft: 6 }}>BETA</span>
           </a>
           <div className="top-actions" style={{ gap: 10 }}>
@@ -65,27 +66,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </a>
           </div>
         </header>
-        <script dangerouslySetInnerHTML={{ __html: `
-(function(){
-  function sun(){return '<path d="M6.76 4.84l-1.8-1.79M12 3V1M17.24 4.84l1.8-1.79M21 12h2M19.04 19.04l1.41 1.41M12 23v-2M2.59 20.45l1.41-1.41M1 12h2" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5"/>';}
-  function moon(){return '<path d="M12 3a9 9 0 1 0 9 9c0-.34-.02-.68-.06-1.01A7 7 0 0 1 12 3z" stroke="currentColor" stroke-width="1.5"/>';}
-  function setIcon(){
-    var isDark = document.documentElement.getAttribute('data-theme')==='dark';
-    var ico=document.getElementById('themeIcon'); if(ico) ico.innerHTML = isDark ? sun() : moon();
-    var aster=document.getElementById('asterIcon'); if(aster) aster.setAttribute('src', isDark ? '/asterwhite.svg' : '/asterblack.svg');
-  }
-  function init(){
-    setIcon();
-    var btn=document.getElementById('themeToggle'); if(!btn) return;
-    btn.addEventListener('click', function(){
-      var el=document.documentElement; var isDark=el.getAttribute('data-theme')==='dark';
-      var next=isDark?'light':'dark'; el.setAttribute('data-theme', next); try{localStorage.setItem('theme', next);}catch(e){}
-      setIcon();
-    });
-  }
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
-})();
-` }} />
+        <ThemeToggle />
         {children}
       </body>
     </html>

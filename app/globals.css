@@ -36,7 +36,7 @@ body {
 /* Header */
 .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; position: sticky; top: 0; background: var(--surface); border-bottom: 1px solid var(--border); }
 .brand { display: inline-flex; gap: 8px; align-items: center; text-decoration: none; color: var(--text); }
-.brand img { height: 44px; }
+.brand img { height: 33px; }
 .beta { background: rgba(255,219,1,0.22); color: #1c1c1c; padding: 4px 8px; border-radius: 9999px; font-size: 12px; font-weight: 700; margin-left: 8px; }
 html[data-theme="dark"] .beta { background: rgba(239,190,132,0.16); color: #ffffff; }
 .top-actions { display: flex; align-items: center; gap: 12px; }

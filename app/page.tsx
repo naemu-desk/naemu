@@ -530,38 +530,19 @@ function ActivityPanel() {
 
           {tab === 'readme' && (
             <div style={{ padding: '12px 16px', color: 'var(--text)' }}>
-               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 800, marginBottom: 6 }}>
-                 <img src="/naemu2.png" alt="" style={{ width: 56, height: 56, opacity: .9 }} />
-                 <span>About NAEMU</span>
-               </div>
-              <div style={{ color: 'var(--text)', lineHeight: 1.6 }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom: 8 }}>
-                  <img src="/qwen.svg" alt="Qwen" style={{ width: 18, height: 18, opacity:.9 }} />
-                  <span style={{ fontWeight: 700 }}>Qwen‑powered intraday futures agent</span>
-                </div>
-                <p>
-                  NAEMU is an intraday trading agent that focuses on minutes, not months. It studies the current tape and the most recent rhythm of each market, then makes a concrete plan before any order goes out. A plan always names the instrument, the intent, the size, the invalidation, the objective, and the minimum time it is willing to hold. The agent seeks tight invalidation near entry and a clear target that reflects the same short time scale.
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 800, marginBottom: 6 }}>
+                <img src="/naemu2.png" alt="" style={{ width: 40, height: 40, opacity: .9 }} />
+                <span>About 奈木 (NAEMU)</span>
+              </div>
+              <div style={{ color: 'var(--text)', lineHeight: 1.6, fontSize: 13 }}>
+                <p style={{ marginBottom: 8 }}>
+                  奈木 (NAEMU) trades Aster futures intraday. It asks a Qwen model for a compact plan (action, symbol, size, thesis, stop, take‑profit, min‑hold) and enforces risk caps per trade and overall exposure.
                 </p>
-                <p>
-                  Decisions are agentic. The model receives a compact state with current quotes, twenty four hour change, and a small strip of recent candles for each symbol. From those candles the backend derives moving averages, relative strength, volatility, session range, and a volume weighted anchor. This allows the agent to reason about reclaim, rejection, breakout, and mean reversion with language that is precise yet short.
+                <p style={{ marginBottom: 8 }}>
+                  The dashboard shows a live price ticker, an equity chart, open positions, closed trades, and short status thoughts.
                 </p>
-                <p>
-                  The loop is simple. Sample balances and prices, compute quick indicators, request a decision, record the rationale, and enforce the plan. While holding, the bot watches price against the invalidation and target. A position only closes early if the invalidation is reached. Otherwise it is willing to sit through ordinary noise for the minimum hold window and only then reassess. The goal is fewer entries, cleaner locations, and exits that are decided in advance.
-                </p>
-                <p>
-                  Risk is first class. Each trade is sized from account value and bounded by a hard cap. Exposure across symbols is also bounded. Quantity is rounded to the exchange step size, and the notional is checked against the minimum for the market. If limits would be breached, the order is skipped and the agent logs the reason. Leverage remains within a preset ceiling and can be adjusted at the symbol level as needed.
-                </p>
-                <p>
-                  The state is intentionally narrow. Only what helps a short term decision is included. Prices and a few derived measures are enough to keep the model anchored to the present. Fundamentals, long horizon narratives, and unrelated stream data are excluded. This keeps the language grounded and avoids overfitting to noise that does not move the next few candles.
-                </p>
-                <p>
-                  Thoughts are written for humans. Instead of raw dumps, the agent summarizes what it holds, how it is doing, where the risk sits, and what would change its mind. It notes the nearest stop or target across positions, the strongest or weakest contributor, and whether fresh risk is justified right now. Status updates are rate limited and deduplicated so the feed reads like a journal rather than a log file.
-                </p>
-                <p>
-                  Execution is straightforward. The agent uses market orders when it has conviction and a clear invalidation level. It sizes directly from a dollar amount, converts to quantity at the mark, and only then submits the order after rounding to the correct increment. If an opposite signal appears later and the plan’s conditions are met, it will close the position and record the outcome with entry, exit, size, time in market, and net result.
-                </p>
-                <p>
-                  The roadmap is practical. Expand the universe carefully, improve thesis quality with additional microstructure signals, and trail risk after the position moves in favor. When a plan is working, let it work. When it breaks, accept the small loss, write down why, and move on to the next good location.
+                <p style={{ marginBottom: 0 }}>
+                  Model: qwen2.5‑32b‑instruct • Exchange: Aster
                 </p>
               </div>
             </div>

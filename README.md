@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="./public/naemu2.png" alt="NAEMU" width="120" />
+  <img src="./public/naemu2.png" alt="奈木 (NAEMU)" width="120" />
 </p>
 
-## What NAEMU does
+## What 奈木 (NAEMU) does
 
-NAEMU focuses on short term decisions in the one to fifteen minute range. It builds a compact market state with current prices, a recent kline window, and a small set of indicators: EMA9, EMA21, RSI14, ATR14, VWAP, and a simple range compression measure. The agent asks a Qwen model for one action and one symbol with a clear thesis, a stop, a take profit, a minimum hold time, and a size in dollars. Orders are rounded to the correct step size and respect risk and exposure limits.
+奈木 (NAEMU) trades Aster futures intraday. It makes short‑horizon decisions (1–15 minutes) using a compact market state and a Qwen model plan (action, symbol, size, thesis, stop, take‑profit, min‑hold). Orders respect exchange step size and risk caps.
 
 ## How it works end to end
 
@@ -39,11 +39,11 @@ const DEFAULT_VIBE_CONFIG: VibeConfig = {
 
 ### Market data and indicators
 
-Each tick the worker fetches spot like futures data from Aster. It merges prices with a small rolling window of klines and derives EMA9, EMA21, RSI14, ATR14, VWAP, plus a range compression ratio. Symbols use exchangeInfo to learn quantity step size and minimum notional so orders round correctly.
+Each tick the worker fetches Aster futures data, merges a small kline window, and derives EMA9/EMA21, RSI14, ATR14, VWAP, and range compression. Symbols use exchangeInfo to learn step size and minimum notional.
 
 ### Decision loop with Qwen
 
-The agent calls Qwen in compatible mode through the DashScope endpoint. The system message asks for a compact JSON plan with one clear action.
+The agent calls Qwen (compatible mode via DashScope) and asks for a compact JSON plan with one clear action.
 
 ```ts
 // api-worker/src/index.ts

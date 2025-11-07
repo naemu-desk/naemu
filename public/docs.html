@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NAEMU Documentation</title>
+  <link rel="icon" href="/naemufav.png" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg1: #ffffff;
+      --bg2: #fff3a6;
+      --text: #1c1c1c;
+      --muted: #646b78;
+      --accent: #e2c619;
+      --surface: #ffffff;
+      --border: #e5e7eb;
+    }
+    html[data-theme="dark"] {
+      --bg1: #191919;
+      --bg2: #111111;
+      --text: #f5f5f5;
+      --muted: #999999;
+      --accent: #efbe84;
+      --surface: #1f1f1f;
+      --border: #2a2a2a;
+    }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell;
+      background: var(--bg1);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 0;
+    }
+    .topbar {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+    }
+    .brand img { height: 33px; display: block; }
+    .beta {
+      background: rgba(255,219,1,0.22);
+      color: #1c1c1c;
+      padding: 4px 8px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-left: 6px;
+    }
+    html[data-theme="dark"] .beta {
+      background: rgba(239,190,132,0.16);
+      color: #ffffff;
+    }
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 40px;
+      width: 40px;
+      border-radius: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .icon-btn:hover {
+      background: #f9fafb;
+    }
+    html[data-theme="dark"] .icon-btn:hover {
+      background: #222;
+    }
+    .icon-btn svg {
+      width: 20px;
+      height: 20px;
+    }
+    .icon-btn img {
+      width: 20px;
+      height: 20px;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 24px;
+    }
+    h1 {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    h1 img { height: 48px; }
+    h2 {
+      font-size: 1.75rem;
+      margin-top: 2.5rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--border);
+    }
+    h3 {
+      font-size: 1.25rem;
+      margin-top: 1.5rem;
+      margin-bottom: 0.75rem;
+      color: var(--accent);
+    }
+    p {
+      margin-bottom: 1rem;
+      color: var(--text);
+    }
+    ul, ol {
+      margin-left: 1.5rem;
+      margin-bottom: 1rem;
+    }
+    li {
+      margin-bottom: 0.5rem;
+    }
+    code {
+      background: var(--bg2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.9em;
+      color: var(--accent);
+    }
+    pre {
+      background: var(--bg2);
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin-bottom: 1rem;
+      border: 1px solid var(--border);
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      color: var(--text);
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(239,190,132,0.16);
+      color: var(--text);
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      margin-left: 8px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 1.5rem;
+    }
+    .endpoint {
+      font-family: monospace;
+      background: var(--bg2);
+      padding: 8px 12px;
+      border-radius: 6px;
+      display: inline-block;
+      margin-right: 8px;
+      font-weight: 600;
+    }
+    .endpoint.get { color: #10b981; }
+    .endpoint.post { color: #3b82f6; }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 2rem;
+      color: var(--muted);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.5rem;
+    }
+    th, td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      background: var(--bg2);
+      font-weight: 600;
+    }
+  </style>
+  <script>
+    (function(){
+      try {
+        var saved = localStorage.getItem('theme');
+        var want = saved || 'dark';
+        document.documentElement.setAttribute('data-theme', want);
+        if (saved !== want) localStorage.setItem('theme', want);
+      } catch(e){}
+    })();
+  </script>
+  <script>
+    (function(){
+      function sun(){return '<path d="M6.76 4.84l-1.8-1.79M12 3V1M17.24 4.84l1.8-1.79M21 12h2M19.04 19.04l1.41 1.41M12 23v-2M2.59 20.45l1.41-1.41M1 12h2" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5"/>';}
+      function moon(){return '<path d="M12 3a9 9 0 1 0 9 9c0-.34-.02-.68-.06-1.01A7 7 0 0 1 12 3z" stroke="currentColor" stroke-width="1.5"/>';}
+      function setIcon(){
+        var isDark = document.documentElement.getAttribute('data-theme')==='dark';
+        var ico=document.getElementById('themeIcon'); if(ico) ico.innerHTML = isDark ? sun() : moon();
+        var aster=document.getElementById('asterIcon'); if(aster) aster.setAttribute('src', isDark ? '/asterwhite.svg' : '/asterblack.svg');
+      }
+      function init(){
+        setIcon();
+        var btn=document.getElementById('themeToggle'); if(!btn) return;
+        btn.addEventListener('click', function(){
+          var el=document.documentElement; var isDark=el.getAttribute('data-theme')==='dark';
+          var next=isDark?'light':'dark'; el.setAttribute('data-theme', next); try{localStorage.setItem('theme', next);}catch(e){}
+          setIcon();
+        });
+      }
+      if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
+    })();
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand" style="gap: 6px; display: inline-flex; align-items: center;">
+      <img src="/naemufav.png" alt="" height="33" style="display: block;" />
+      <strong style="margin-left: 6px;">奈木 (NAEMU)</strong>
+      <span class="beta" style="margin-left: 6px;">BETA</span>
+    </a>
+    <div class="top-actions" style="gap: 10px;">
+      <button id="themeToggle" class="icon-btn" title="Toggle theme" aria-label="Theme">
+        <svg id="themeIcon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6.76 4.84l-1.8-1.79M12 3V1M17.24 4.84l1.8-1.79M21 12h2M19.04 19.04l1.41 1.41M12 23v-2M2.59 20.45l1.41-1.41M1 12h2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+      </button>
+      <a href="https://www.asterdex.com/en/referral/AC792c" target="_blank" rel="noopener noreferrer" class="icon-btn" title="Aster" aria-label="Aster">
+        <img id="asterIcon" src="/asterwhite.svg" alt="Aster" style="width: 20px; height: 20px;" />
+      </a>
+      <a href="/docs.html" target="_blank" rel="noopener noreferrer" class="icon-btn" title="Docs" aria-label="Docs">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.5"/><path d="M14 3v5h5" stroke="currentColor" stroke-width="1.5"/></svg>
+      </a>
+      <a href="https://x.com/naemudesk" target="_blank" rel="noopener noreferrer" class="icon-btn" title="X" aria-label="X">
+        <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+      </a>
+      <a href="https://github.com/naemu-desk/naemu" target="_blank" rel="noopener noreferrer" class="icon-btn" title="GitHub" aria-label="GitHub">
+        <svg viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <div class="container">
+    <a href="/" class="back-link">← Back to Dashboard</a>
+
+    <h1>
+      <img src="/naemu2.png" alt="NAEMU" />
+      NAEMU Documentation
+    </h1>
+
+    <div class="card">
+      <h2>What is NAEMU?</h2>
+      <p>
+        <strong>奈木 (NAEMU)</strong> is an autonomous intraday futures trading agent that trades on <a href="https://www.asterdex.com" target="_blank">Aster</a>. 
+        It makes short-term trading decisions (1–15 minute horizons) using market indicators and AI-powered analysis.
+      </p>
+      <p>
+        NAEMU uses the <strong>Qwen 2.5 32B Instruct</strong> model to analyze market conditions and generate trading plans with entry prices, stop-losses, take-profits, and position sizing.
+      </p>
+    </div>
+
+    <h2>How It Works</h2>
+
+    <div class="card">
+      <h3>1. Market Analysis</h3>
+      <p>
+        Every minute, NAEMU fetches live market data from Aster including:
+      </p>
+      <ul>
+        <li>Current prices for BTC, ETH, BNB, XRP, DOGE, SOL, ASTER, CAKE, ZORA, PUMP, and ZEC</li>
+        <li>24-hour price changes</li>
+        <li>Technical indicators: EMA(9/21), RSI(14), ATR(14), VWAP, and range compression</li>
+        <li>Orderbook microstructure</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>2. AI Decision Making</h3>
+      <p>
+        The Qwen model analyzes the market state and outputs a structured trading plan:
+      </p>
+      <ul>
+        <li><strong>Action:</strong> LONG, SHORT, or FLAT</li>
+        <li><strong>Symbol:</strong> Which futures pair to trade</li>
+        <li><strong>Size:</strong> Position size in USD</li>
+        <li><strong>Thesis:</strong> Reasoning for the trade</li>
+        <li><strong>Stop Loss:</strong> Price level to exit if wrong</li>
+        <li><strong>Take Profit:</strong> Price target to exit if right</li>
+        <li><strong>Min Hold:</strong> Minimum time to hold the position</li>
+      </ul>
+      <p>
+        NAEMU only takes trades when there's a <strong>high-conviction setup</strong> with at least a 2:1 reward-to-risk ratio.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>3. Risk Management</h3>
+      <p>NAEMU enforces strict risk controls:</p>
+      <ul>
+        <li><strong>Hard stop-loss:</strong> Automatically closes positions at -$200 unrealized PnL</li>
+        <li><strong>Position sizing:</strong> Targets 50% of equity per trade (capped at $1,500)</li>
+        <li><strong>Cooldown:</strong> 15 minutes minimum between new positions</li>
+        <li><strong>Loss protection:</strong> Pauses trading after multiple recent losses</li>
+        <li><strong>No position stacking:</strong> Only one position at a time per symbol</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>4. Trade Execution</h3>
+      <p>
+        When a trade is executed:
+      </p>
+      <ul>
+        <li>Orders are rounded to exchange step sizes</li>
+        <li>Positions are tracked in real-time</li>
+        <li>Stop-losses and take-profits are automatically enforced</li>
+        <li>All trades are recorded with entry/exit prices and PnL</li>
+      </ul>
+    </div>
+
+    <h2>Dashboard Features</h2>
+
+    <div class="card">
+      <h3>Price Ticker</h3>
+      <p>
+        The scrolling ticker shows live prices for all supported symbols. Hover to pause, click to open the Aster futures page for that pair.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Equity Chart</h3>
+      <p>
+        The canvas chart displays your account equity over time. Hover to see exact values and timestamps. The chart starts from a fixed historical point and extends dynamically.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Activity Panel</h3>
+      <p><strong>Trades Tab:</strong></p>
+      <ul>
+        <li><strong>Open:</strong> Current positions with entry price, current price, quantity, and unrealized PnL</li>
+        <li><strong>Closed:</strong> Completed trades sorted by PnL or date, showing entry/exit prices, holding time, and realized PnL</li>
+      </ul>
+      <p><strong>Thoughts Tab:</strong></p>
+      <ul>
+        <li>Real-time status updates and decision logs from the agent</li>
+        <li>Shows what NAEMU is thinking and why it's making certain decisions</li>
+      </ul>
+      <p><strong>Readme Tab:</strong></p>
+      <ul>
+        <li>Brief overview of how NAEMU trades</li>
+      </ul>
+    </div>
+
+    <h2>API Reference</h2>
+
+    <div class="card">
+      <h3>Status & Control</h3>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/status</code>
+        <br>Returns current configuration and runtime status
+      </p>
+      <p>
+        <span class="endpoint post">POST</span>
+        <code>/api/vibe/run</code>
+        <br>Start the trading agent (requires admin key)
+      </p>
+      <p>
+        <span class="endpoint post">POST</span>
+        <code>/api/vibe/stop</code>
+        <br>Stop the trading agent (requires admin key)
+      </p>
+      <p>
+        <span class="endpoint post">POST</span>
+        <code>/api/vibe/tick</code>
+        <br>Manually trigger a trading decision cycle
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Market Data</h3>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/prices</code>
+        <br>Get current prices for all symbols
+      </p>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/tickers</code>
+        <br>Get detailed ticker data with 24h changes
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Trades</h3>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/open-trades</code>
+        <br>Get all currently open positions
+      </p>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/trades</code>
+        <br>Get all closed trades
+      </p>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/trades/stats</code>
+        <br>Get trade statistics (total, max PnL, top 10, etc.)
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Equity & Logs</h3>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/equity</code>
+        <br>Get equity history for charting
+      </p>
+      <p>
+        <span class="endpoint get">GET</span>
+        <code>/api/vibe/logs</code>
+        <br>Get decision and status logs
+      </p>
+    </div>
+
+    <h2>Configuration</h2>
+
+    <div class="card">
+      <p>Default configuration values:</p>
+      <table>
+        <tr>
+          <th>Setting</th>
+          <th>Value</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td><code>maxRiskPerTradeUsd</code></td>
+          <td>1500</td>
+          <td>Maximum USD risk per trade</td>
+        </tr>
+        <tr>
+          <td><code>maxDailyLossUsd</code></td>
+          <td>2000</td>
+          <td>Maximum daily loss before stopping</td>
+        </tr>
+        <tr>
+          <td><code>maxExposureUsd</code></td>
+          <td>10000</td>
+          <td>Maximum total exposure across all positions</td>
+        </tr>
+        <tr>
+          <td><code>maxLossPerTradeUsd</code></td>
+          <td>200</td>
+          <td>Hard stop-loss per trade (unrealized PnL)</td>
+        </tr>
+        <tr>
+          <td><code>leverageCap</code></td>
+          <td>5</td>
+          <td>Maximum leverage allowed</td>
+        </tr>
+        <tr>
+          <td><code>marginMode</code></td>
+          <td>cross</td>
+          <td>Cross margin mode</td>
+        </tr>
+        <tr>
+          <td><code>model</code></td>
+          <td>qwen2.5-32b-instruct</td>
+          <td>Qwen model used for decisions</td>
+        </tr>
+      </table>
+    </div>
+
+    <h2>Risk Warning</h2>
+
+    <div class="card" style="border-left: 4px solid #b91c1c;">
+      <p>
+        <strong>⚠️ Trading futures involves significant risk.</strong> NAEMU is an experimental trading agent and may lose money. 
+        Only trade with funds you can afford to lose. Past performance does not guarantee future results.
+      </p>
+      <p>
+        NAEMU is provided "as-is" without warranty. Use at your own risk.
+      </p>
+    </div>
+
+    <h2>Support</h2>
+
+    <div class="card">
+      <p>
+        <strong>GitHub:</strong> <a href="https://github.com/naemu-desk/naemu" target="_blank">github.com/naemu-desk/naemu</a>
+      </p>
+      <p>
+        <strong>Twitter/X:</strong> <a href="https://x.com/naemudesk" target="_blank">@naemudesk</a>
+      </p>
+      <p>
+        <strong>Exchange:</strong> <a href="https://www.asterdex.com/en/referral/AC792c" target="_blank">Aster Futures</a>
+      </p>
+    </div>
+
+    <div style="margin-top: 3rem; padding-top: 2rem; border-top: 1px solid var(--border); text-align: center; color: var(--muted);">
+      <p>© 2024 奈木 (NAEMU). Built with Qwen AI and Aster Futures.</p>
+    </div>
+  </div>
+</body>
+</html>
+
