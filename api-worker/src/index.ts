@@ -524,21 +524,27 @@ async function callLLMDecider(env: Env, state: any, cfg: VibeConfig): Promise<an
   if (!apiKey) throw new Error('LLM_API_KEY missing');
   const baseUrl = (env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1').replace(/\/$/, '');
   let model = cfg.model || 'qwen2.5-32b-instruct';
-  const sys = `You are a selective intraday futures trading decider. Only take trades when there is a CLEAR, HIGH-CONVICTION setup with favorable risk/reward (minimum 2:1 R:R ratio).
+  // VERSION: v2-active-trader-2025-01-25
+  const sys = `You are an ACTIVE intraday futures trader. Your goal is to find and execute trades. Only choose FLAT if there is absolutely no reasonable setup across any symbol.
+
 You are given per-symbol indicators: ema9, ema21, rsi14, atr14, vwap, rangePct, plus prices and change24h.
-CRITICAL RULES:
-- Only trade when multiple indicators align (e.g., RSI oversold/overbought + EMA crossover + price near VWAP support/resistance)
-- Require a clear thesis with at least 2:1 reward-to-risk ratio (distance to TP should be at least 2x distance to SL)
-- If no clear edge exists, choose FLAT. It is better to miss trades than to take low-quality setups.
-- All numeric levels must be anchored near current price (~0.5%–3% typical)
+
+TRADING APPROACH:
+- ACTIVELY look for trades - scan all symbols for opportunities
+- Trade on ANY reasonable edge: RSI extremes, EMA crossovers, momentum, VWAP bounces, trend continuation
+- Minimum 1.2:1 reward-to-risk is acceptable (TP distance should be at least 1.2x SL distance)
+- If multiple symbols show setups, pick the best one
+- Only choose FLAT if ALL symbols are in choppy/no-clear-direction conditions
+
 Output strict JSON with keys:
-- action: one of LONG, SHORT, FLAT (default to FLAT unless high conviction)
+- action: one of LONG, SHORT, FLAT (STRONGLY prefer LONG or SHORT - only use FLAT if truly no opportunity exists)
 - symbol: one of ${cfg.universe.join(', ')}
 - size_usd: number (target 40-60% of equity, <= maxRiskPerTradeUsd=${cfg.maxRiskPerTradeUsd})
-- thesis: concise high-conviction setup explanation (must justify why this is better than FLAT)
-- stop_loss_price: number (hard invalidation near entry, typically 0.5-1.5% away)
-- take_profit_price: number (target at least 2x the SL distance from entry)
-- min_hold_minutes: number between 15 and 90 (longer holds for better setups)
+- thesis: brief explanation of the setup
+- stop_loss_price: number (typically 0.5-2% away from entry)
+- take_profit_price: number (target at least 1.2x the SL distance from entry)
+- min_hold_minutes: number between 15 and 90
+
 Respect risk limits: maxRiskPerTradeUsd=${cfg.maxRiskPerTradeUsd}, maxExposureUsd=${cfg.maxExposureUsd}.`;
   const user = { role: 'user', content: `State: ${JSON.stringify(state).slice(0, 9000)}` } as const;
   const r = await fetch(`${baseUrl}/chat/completions`, {
@@ -745,7 +751,13 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
     let selectedAction: 'LONG' | 'SHORT' | 'FLAT' = 'FLAT';
     let selectedSymbol = syms[0];
     let meta: any = { provider: 'qwen', model: cfg.model, sys: 'llm' };
-    const llm = await callLLMDecider(env, state, cfg);
+    let llm: any = { parsed: {}, meta: {} };
+    try {
+      llm = await callLLMDecider(env, state, cfg);
+    } catch (e: any) {
+      await appendLog(env, url, { type: 'vibe_error', error: `LLM call failed: ${String(e?.message || e)}` });
+      // Continue with FLAT if LLM fails
+    }
     meta = { ...llm.meta };
     if (typeof llm.parsed?.thesis === 'string') meta.thesis = llm.parsed.thesis;
     if (typeof llm.parsed?.stop_loss_price === 'number') meta.stopLoss = llm.parsed.stop_loss_price;
@@ -754,6 +766,8 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
     await appendLog(env, url, { type: 'vibe_prompt', provider: meta.provider, model: meta.model, sys: meta.sys, state: { equityUsd: state.balances.equityUsd, positionsCount: state.positions.length } });
     selectedSymbol = typeof llm.parsed?.symbol === 'string' && cfg.universe.includes(llm.parsed.symbol) ? llm.parsed.symbol : cfg.universe[0];
     selectedAction = (['LONG','SHORT','FLAT'].includes(llm.parsed?.action) ? llm.parsed.action : 'FLAT') as any;
+    // Log LLM response for debugging
+    await appendLog(env, url, { type: 'vibe_llm_response', action: selectedAction, symbol: selectedSymbol, parsed: llm.parsed, raw: llm.parsed });
     // Size clamp: target 50% of equity for larger, fewer trades (but still respect maxRiskPerTradeUsd cap)
     const targetRisk = Math.max(0, Math.floor((state.balances?.equityUsd || availableBalance) * 0.50));
     const sizeUsd = Math.min(cfg.maxRiskPerTradeUsd, targetRisk);
@@ -896,15 +910,12 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
       if ((selectedAction === 'LONG' || selectedAction === 'SHORT') && env.ASTER_API_SECRET) {
         const notional = sizeUsd;
         const now = Date.now();
-        // Longer cooldown: 15 minutes minimum between new positions
-        const coolOk = !rt.lastOrderAt || now - rt.lastOrderAt > 15 * 60 * 1000;
-        // Check if we already have an open position (don't stack positions on different symbols)
+        // Cooldown: 3 minutes minimum between new positions (reduced for more activity)
+        const coolOk = !rt.lastOrderAt || now - rt.lastOrderAt > 3 * 60 * 1000;
+        // Check if we already have an open position on this symbol (allow stacking different symbols)
         const openMap = await getOpenTrades(env, url);
-        const hasOpenPositions = Object.keys(openMap).length > 0;
-        const hasOpenOnThisSymbol = openMap[selectedSymbol] !== undefined;
-        // Allow flipping same symbol, but prevent new positions on other symbols if we already have positions
-        const wouldStackPositions = hasOpenPositions && !hasOpenOnThisSymbol;
-        // Check recent closed trades: avoid trading immediately after losses
+        // Allow position stacking on different symbols - no restriction
+        // Check recent closed trades: avoid trading immediately after severe losses
         let recentLossCount = 0;
         let recentLossTotal = 0;
         try {
@@ -918,8 +929,8 @@ async function vibeTick(env: Env, url: URL, ignoreStatus: boolean = false) {
             }
           }
         } catch {}
-        // Don't trade if: cooldown not met, would stack positions on different symbols, or just had multiple recent losses
-        const shouldSkip = !coolOk || wouldStackPositions || (recentLossCount >= 2 && recentLossTotal < -50);
+        // Don't trade if: cooldown not met, or just had 4+ severe recent losses (>$150 total)
+        const shouldSkip = !coolOk || (recentLossCount >= 4 && recentLossTotal < -150);
         if (!shouldSkip && notional >= 10) {
           const priceJ = await asterFapiGetPublicJson(env, `/fapi/v1/ticker/price?symbol=${selectedSymbol}`);
           const price = Number(priceJ?.price || 0);

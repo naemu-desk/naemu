@@ -52,12 +52,48 @@ function useArenaData() {
 function ChartPane() {
   const { equity } = useArenaData();
   // Use all samples returned (anchor + daily shards) so left edge stays fixed
-      const pointsAll = Array.isArray(equity) ? equity : [];
-  // Start at Oct 22, 17:30 (local year)
-  const now = new Date();
-  const cut = new Date(now.getFullYear(), 9, 25, 0, 0).getTime(); // month 9 = Oct, start Oct 25 00:00
-  const filtered = pointsAll.filter((p: any) => Number(p?.at || 0) >= cut);
-  const points = filtered.length >= 2 ? filtered : pointsAll;
+  const pointsAll = Array.isArray(equity) ? equity : [];
+  
+  // Find the MOST RECENT time equity reached 900, then go back to find the spike start
+  // Start from the end (most recent) and work backwards
+  let startIdx = 0;
+  if (pointsAll.length > 0) {
+    // Find the most recent point where equity >= 900 (working backwards from the end)
+    let recent900Idx = -1;
+    for (let i = pointsAll.length - 1; i >= 0; i--) {
+      const eq = Number(pointsAll[i]?.equityUsd || 0);
+      if (eq >= 900) {
+        recent900Idx = i;
+        break;
+      }
+    }
+    
+    if (recent900Idx >= 0) {
+      // Found recent 900 point, now go back to find where it was around 361 (before the spike)
+      // Look backwards from the 900 point to find where equity was <= 400
+      for (let j = recent900Idx; j >= 0 && j >= recent900Idx - 300; j--) {
+        const prevEq = Number(pointsAll[j]?.equityUsd || 0);
+        if (prevEq <= 400) {
+          // Start from a bit before this point to show the spike
+          startIdx = Math.max(0, j - 5);
+          break;
+        }
+      }
+      // If we didn't find a low point going back, just start 50 points before the 900 point
+      if (startIdx === 0 && recent900Idx > 0) {
+        startIdx = Math.max(0, recent900Idx - 50);
+      }
+      // Shift forward 8 minutes (8 data points) to skip the 300 numbers
+      if (startIdx > 0) {
+        startIdx = Math.min(pointsAll.length - 1, startIdx + 8);
+      }
+    } else {
+      // No 900 point found, just take last 2000 points
+      startIdx = pointsAll.length > 2000 ? pointsAll.length - 2000 : 0;
+    }
+  }
+  
+  const points = pointsAll.slice(startIdx);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const labelRef = useRef<HTMLDivElement | null>(null);
